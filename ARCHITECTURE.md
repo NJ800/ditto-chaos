@@ -185,3 +185,52 @@ The practical reason to keep them separate: if `guard.py` depended on `probe.cur
 ## Known limitations
 
 See the README's "Safety limitations" section — it's the single source of truth for this, kept next to the setup instructions where it'll actually be read.
+
+
+## Version 2 architecture
+
+Detail, guarantees and verification status: [docs/V2.md](docs/V2.md).
+
+```mermaid
+flowchart LR
+    subgraph ui["frontend/ (React)"]
+        dash["7 pages<br/>snapshot + SSE"]
+    end
+    subgraph apiL["api.py"]
+        rest["REST + /api/stream"]
+    end
+    subgraph ctl["control"]
+        controller["controller.py<br/>modes, sandbox checks,<br/>autonomous loop"]
+        orch["orchestrator.py<br/>one run at a time"]
+        coord["agents.py coordinator<br/>risk, fault_injection |<br/>recovery, validation, insights,<br/>learning, remediation"]
+    end
+    subgraph exec["deterministic execution"]
+        scen["scenario.py<br/>validate, locks, journal,<br/>kill switch, rollback, lockout"]
+        faults["faults.py registry"]
+        guard["guard.py helpers<br/>check_breach, run_cmd"]
+    end
+    subgraph data["state"]
+        store[("store.py SQLite")]
+        files[("experiments/*.json<br/>state/journal, lockout")]
+        bus["events.py bus"]
+        mon["monitor.py"]
+    end
+    dash --> rest --> controller --> orch
+    rest --> orch
+    orch --> coord
+    orch --> scen --> faults --> guard --> docker[(Docker)]
+    scen --> files
+    coord --> store
+    scen -- events --> bus
+    mon -- probe files, docker stats --> bus
+    bus --> rest
+```
+
+The decisions that matter:
+
+- **One engine mutates.** `scenario.ScenarioRun` is the only v2 code that applies a fault. Agents, the planner and the controller produce documents and an `Authorization`; they never issue a Docker command.
+- **Authorization is an object, not a flag in a payload.** `ScenarioRun.prepare()` refuses anything that is not a real `scenario.Authorization`, and only `controller.py` constructs one.
+- **Safety does not depend on observers.** The engine probes Ditto itself, in process, every tick. `probe.py`, `monitor.py`, the event bus and the browser can all die without affecting stop or rollback.
+- **Process boundary kept from v1.** `probe.py` stays a separate process writing JSONL; the API's monitor only reads it. A scenario run and the API share one process, which is why startup replays the recovery journal and shutdown waits for rollback.
+- **JSON files remain the source records.** SQLite is an index plus learning tables, rebuilt from the files by `store.sync_from_files()`. A broken database degrades learning (HTTP 503 on those endpoints) and never blocks a rollback.
+- **Legacy path preserved.** `guard.py` and the schema-1.0 single-fault proposal/run endpoints still work; schema-1.0 records are read everywhere schema-2.0 ones are.

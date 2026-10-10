@@ -6,7 +6,7 @@ AI-assisted chaos engineering for [Eclipse Ditto](https://github.com/eclipse-dit
 
 Digital-twin platforms like Ditto sit in the critical path for fleets of real devices. "It works on a healthy day" isn't resilience — resilience is knowing what breaks, how badly, and whether the system recovers, *before* a real outage teaches you the hard way. This project deliberately breaks one thing at a time in a local sandbox, watches what happens with the same signals a human on-call engineer would watch, and automatically reverts the moment things look unsafe.
 
-**What makes this "AI-driven" — and what doesn't.** An LLM never decides what to break or when to stop; that would mean an LLM could cause (or fail to stop) a real outage, which this project treats as a hard line. Deterministic Python (`guard.py`) owns every decision that touches a running container or network namespace. The AI's job starts only *after* an experiment guard.py already ran and reverted: it reads the real before/during/after measurements and produces grounded root-cause hypotheses, severity-ranked findings, and recommended fixes — and even that output is schema-validated before being trusted, with a deterministic fallback when AI is disabled or unavailable.
+**What makes this "AI-driven" — and what doesn't.** An LLM never decides when to stop, never authorizes a run, and never issues a command; that would mean an LLM could cause (or fail to stop) a real outage, which this project treats as a hard line. In v2 a model may *choose among* experiment candidates that the deterministic policy engine has already validated — nothing more (see [docs/V2.md](docs/V2.md)). Deterministic Python (`guard.py`) owns every decision that touches a running container or network namespace. The AI's job starts only *after* an experiment guard.py already ran and reverted: it reads the real before/during/after measurements and produces grounded root-cause hypotheses, severity-ranked findings, and recommended fixes — and even that output is schema-validated before being trusted, with a deterministic fallback when AI is disabled or unavailable.
 
 ## What's actually implemented
 
@@ -36,9 +36,24 @@ Digital-twin platforms like Ditto sit in the critical path for fleets of real de
 | Human-authorized real fault injection via CLI or dashboard | ✅ `main.py plan`/`run`, `POST /api/experiments/run` with `authorize: true` |
 | Stop an in-progress experiment early (still reverts + verifies recovery) | ✅ `POST /api/experiments/{id}/stop`, `orchestrator.request_stop()` |
 | Remediation decision tracking (approve/reject) + live before/after verification | ✅ `orchestrator.decide_remediation()`/`verify_remediation()` |
-| 193 automated tests, all mocked/offline | ✅ `python -m pytest -q` |
+| Automated tests (see "Running tests") | ✅ `python -m pytest -q` |
 
-**Explicitly still not built**, and why: Category B/C auto-remediation (applying a fix automatically) and a fully autonomous multi-experiment loop. Every real fault injection still requires one explicit human action — a dashboard checkbox or a typed `yes`/`--yes` — no matter which agent proposed it. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full reasoning.
+**Version 2** (multi-fault scenarios, agents, autonomy, live stream -- full detail in [docs/V2.md](docs/V2.md)):
+
+| Capability | Status |
+|---|---|
+| Fault registry: `kill`, `stop`, `restart`, `pause`, `delay`, `jitter`, `loss`, `bandwidth`, `cpu_throttle` | implemented; mocked tests + real-Docker tests on a throwaway container |
+| `cpu_stress`, `memory_pressure`, `request_failure` | **not supported**, listed with the reason |
+| Multi-fault scenarios: atomic preflight, limits, conflict checks, tested-combination allowlist | implemented; mocked tests; one two-fault scenario run live |
+| Verified, independent rollback of every applied fault; recovery journal; `RECOVERY_REQUIRED` lockout | implemented; mocked tests only for the failure paths |
+| Operating modes `observe` / `recommend` / `manual` / `autonomous_sandbox` | implemented; mocked tests; the autonomous loop has not been run against real Ditto |
+| Seven agents with a coordinator and persisted run status | implemented; mocked tests; post-run pipeline run live once (on the deterministic fallback) |
+| Knowledge store (SQLite) + deterministic learning that re-ranks candidates | implemented; mocked tests; no trained model, by design |
+| Live stream (SSE) with snapshot, replay, resync; readiness/liveness | implemented; tested; observed live |
+| Redesigned 7-page dashboard | implemented; 57 component tests, production build, and a real-browser smoke test over every page (no console errors) |
+| Activity log (`events` in every record, incremental API, `ActivityLog` component) and scenario dry run | implemented; mocked tests; a dry run was observed live through the API |
+
+`AUTONOMY_MODE` defaults to `recommend`, where every real fault still needs an explicit operator authorization. The autonomous loop only exists when `AUTONOMY_SANDBOX_ENABLED=true` is set in `.env`; it cannot be enabled from the dashboard. Nothing in any mode auto-applies a remediation.
 
 ## Repository structure
 
@@ -54,8 +69,18 @@ remediation_planner.py  classifies findings into safety categories; never auto-a
 planner_agent.py        (Day 2) proposes one experiment; allowlist/bounds-validated, AI-optional
 orchestrator.py          (Day 2) the ONE place a real fault gets authorized + run; shared by main.py and api.py
 api.py                   (Day 2) FastAPI backend for the dashboard -- read-only + orchestrator-gated writes
-frontend/                 (Day 2) React + Vite + TS + Tailwind dashboard, polls api.py
+frontend/                 React + Vite + TS + Tailwind dashboard (v2: snapshot + SSE stream)
 main.py                  CLI: doctor / map / health / baseline / plan / run / analyze / report / serve
+                         / faults / scenario / recover
+faults.py                (v2) fault registry -- one class per fault type
+scenario.py              (v2) multi-fault engine, recovery journal, lockout
+controller.py            (v2) operating modes + the autonomous sandbox loop
+agents.py                (v2) seven agents and their coordinator
+scenario_planner.py      (v2) scenario proposals from ranked, pre-validated candidates
+learning.py              (v2) observe / predict / compare / rank -- deterministic
+store.py                 (v2) SQLite knowledge store
+events.py, monitor.py    (v2) event bus + server-side monitor behind /api/stream
+docs/V2.md               (v2) modes, faults, safety guarantees, learning formula, limitations
 test_guard.py, tests/    193 tests, all offline (Docker/HTTP/AI calls mocked)
 experiments/              one JSON record per guard.py run (atomic writes, unique filenames)
 reports/                   AI/deterministic findings + remediation plans per experiment
@@ -136,25 +161,39 @@ This asks for interactive confirmation (skip with `--yes`), acquires a per-targe
 python guard.py --fault delay --target mongodb --ms 500 --ttl 10 --preflight-only
 ```
 
-## Run the dashboard (Day 2)
+## Run the dashboard
 
-The dashboard is an AI planner + human-approval front end for the exact same `guard.py` lifecycle above -- it does not add a second, different way to inject a fault. Three terminals:
+Four terminals (Windows PowerShell shown; Ditto must already be up):
 
-```bash
-python simulator.py            # terminal 1: fleet traffic
-python probe.py                # terminal 2: live health data for the dashboard to show
-python main.py serve           # terminal 3: backend API on http://127.0.0.1:8000
+```powershell
+.venv\Scripts\python.exe simulator.py                    # terminal 1: fleet traffic
+.venv\Scripts\python.exe main.py baseline --duration 120 # once: a fresh baseline (expires after 60 min)
+.venv\Scripts\python.exe probe.py                        # terminal 2: live health data
+.venv\Scripts\python.exe main.py serve                   # terminal 3: API on http://127.0.0.1:8000
 ```
 
-```bash
+```powershell
 # terminal 4
 cd frontend
-npm install                    # first time only
-cp .env.example .env           # only if the API isn't on the default host/port
-npm run dev                    # http://localhost:5173
+npm install        # first time only
+npm run dev        # http://localhost:5173
 ```
 
-Open http://localhost:5173. **Overview** shows live health; **AI Experiment Center** generates a proposal and requires you to explicitly check "I am an operator and I authorize a REAL fault injection" (or leave "Preview only" checked for a zero-Docker dry run) before the run button does anything real; **Live Monitoring** charts real probe data against your baseline and configured thresholds; **Experiment History** lists every saved run; **AI Insights & Remediation** shows findings and lets you approve/reject/verify remediation items (approving records an audit-trail decision -- see "Day 1 policy" below, it does not apply anything automatically).
+`main.py serve` refuses to start, with a clear message, if port 8000 is already in use (run on another port with `$env:API_PORT=8001`, and set `VITE_API_BASE_URL` for the dashboard) or if `API_HOST` is not loopback and no `API_TOKEN` is set. Network faults need `docker pull nicolaka/netshoot` once.
+
+Open http://localhost:5173. The header always shows the target's state (`HEALTHY`, `DEGRADED`, `STALE`, `UNKNOWN` or `DISCONNECTED` -- never `HEALTHY` for data that is not fresh), the operating mode, and the stream connection.
+
+- **Overview** -- target health against the baseline, container states with CPU/memory, the monitoring pipeline's own health, alerts.
+- **Live monitoring** -- latency, failures, staleness and consistency charts with the fault interval shaded and the stop limits drawn.
+- **Experiment control** -- operating mode and sandbox checks; the agent proposal; a multi-fault scenario builder with **Preview plan** (pure policy check, shows the commands that would run) and **Preflight** (read-only container check); the run button needs a passed preview *and* the authorization checkbox; lifecycle, per-fault status and **Emergency stop** for the running experiment.
+- **Agents** -- each agent's state, last result, failures and persisted runs; the experiment timeline from persisted backend events.
+- **History** -- searchable list (dry runs are labelled and never count as evidence); per-experiment detail with measurements, validation, findings (measured vs hypothesis), learning record, recommendations, timeline.
+- **Insights & learning** -- evidence counts, the next-experiment ranking with score components, repeated patterns, learning records, recommendation tracking.
+- **Dependencies** -- call edges, blast radius, risk and test coverage per service.
+
+**Activity log.** Every experiment, real or dry run, records a step-by-step log of what the controller did and why: precondition results, the baseline and the stop limits with their actual numbers, each command, one health event and one continue/stop decision per monitoring tick, each rollback and its verification, recovery progress, and any error. It is shown under the lifecycle on **Experiment control** while a run is in progress, and on each experiment's page in **History** as a replay of the saved record. Selecting a lifecycle step filters the log to that step and explains what the step does. Command rows show the exact command, a copy button, and whether it really ran: `EXECUTED` with its exit code and any error output, or `DRY RUN — NOT EXECUTED`. The log updates incrementally (`GET /api/experiments/{id}/events?after_seq=N`, every 1.5 s, only new events) and stops polling when the run ends; it follows the newest event until you scroll up, then offers **Jump to latest**. Rollback failures and unverified recovery appear as `ERROR` rows and are never followed by a success message. **Dry run (no injection)** in the scenario builder walks the whole lifecycle with real health checks and lists every command it would run without contacting Docker; it needs no authorization and never counts as evidence. Records saved before this feature have no log and say so.
+
+If a rollback cannot be verified, a red **Recovery required** banner appears on every page with the manual commands, and all fault injection is refused until it is resolved (see [docs/V2.md](docs/V2.md#resolving-recovery_required)).
 
 The CLI has the equivalent, scriptable path through the same `orchestrator.py` -- useful for a terminal-only demo or CI:
 
@@ -166,6 +205,33 @@ python main.py run --yes                     # real: skips the prompt (non-inter
 ```
 
 `main.py run` always re-validates the proposal's target against `guard.py`'s live `ALLOWLIST` and checks current health immediately before injecting -- a proposal from a minute ago might not be safe anymore. **An AI proposal can never run on its own**: the CLI still requires the same typed confirmation `guard.py` has always required, and the API still requires `authorize: true` set by an explicit dashboard click.
+
+## Deploy (single process, single port)
+
+This tool controls Docker on the machine it runs on, so it is deployed **on the host that runs the Ditto sandbox**, next to the Docker daemon -- not on a separate server and not inside a container without access to that daemon.
+
+```powershell
+# 1. build the dashboard once (and again after frontend changes)
+cd frontend; npm ci; npm run build; cd ..
+
+# 2. configure .env (copy .env.example) -- at minimum, for anything but your own laptop:
+#      API_TOKEN=<long random string>     required whenever API_HOST is not loopback
+#      API_HOST=0.0.0.0                   only if other machines must reach it
+#      AUTONOMY_MODE=recommend            keep unless you have read docs/V2.md
+
+# 3. run the three long-lived processes (use your service manager of choice)
+.venv\Scripts\python.exe simulator.py
+.venv\Scripts\python.exe probe.py
+.venv\Scripts\python.exe main.py serve     # API + built dashboard on http://<host>:8000/
+```
+
+- `main.py serve` serves `frontend/dist` itself, so the dashboard and the API share one origin: no second web server, no CORS setup. The dev server (`npm run dev`) is only for working on the frontend.
+- With `API_TOKEN` set, **every** `/api` route requires it (reads too), except `/api/livez` and `/api/readyz`. The dashboard asks for it once per browser tab ("Set API token"). The live stream uses a single-use 30-second ticket, so the token never appears in a URL or an access log.
+- Health checks for a supervisor: `GET /api/livez` (process is up) and `GET /api/readyz` (200 only when the knowledge store is reachable, the monitor loop is ticking and there is no recovery lockout).
+- Stop with Ctrl+C / SIGINT: shutdown waits for a running experiment to roll back. After a hard kill, the next start replays the recovery journal before accepting requests.
+- Put TLS in front (a reverse proxy) if the port is reachable from a network you do not control; this process speaks plain HTTP. Disable response buffering for `/api/stream` in that proxy.
+- State lives in `experiments/`, `reports/`, `state/` (knowledge DB, journal, lockout) and `baseline.json`. Back those up; everything else is rebuildable.
+- Before first use on a new machine, run the real-Docker suite and the browser smoke test from "Running tests".
 
 ## Map dependencies
 
@@ -203,12 +269,36 @@ See `guard.py`'s `run_experiment()` docstring for the authoritative field list. 
 
 ## Running tests
 
-```bash
-python -m pytest -q
+```powershell
+.venv\Scripts\python.exe -m pytest -q
 ```
-193 tests, ~8 seconds, zero real Docker/HTTP/AI calls (everything is mocked). Last real run: **193 passed**. Covers `guard.py`/`probe.py` (Day 1), plus `planner_agent.py`, `orchestrator.py`, and `api.py` (Day 2, via FastAPI's `TestClient`).
+Last run (2026-10-10): **431 passed, 10 skipped**, no warnings, in ~22 s. Docker, Ditto and the AI provider are mocked; the 10 skipped tests are the real-Docker suite below. The suite covers the v1 code (`guard.py`, `probe.py`, planner, orchestrator, API) plus v2: fault registry, scenario engine (partial failure, emergency stop, cancellation, lockout, journal replay), agents and coordinator, learning and store, controller/autonomous loop, event bus and monitor, and the HTTP contract.
 
-Frontend: `cd frontend && npm run build` type-checks (`tsc --noEmit`) and produces a production bundle -- there's no separate frontend unit-test suite yet (Day 2 was verified by building, driving it with a real headless browser against the real backend, and screenshotting all 5 pages + the approve/verify interactions; see DAY2_CHECKLIST.md).
+Real Docker (opt-in; uses one throwaway `alpine` container, never the Ditto services):
+```powershell
+docker pull alpine:3.20; docker pull nicolaka/netshoot
+$env:DITTO_CHAOS_REAL_DOCKER = "1"; .venv\Scripts\python.exe -m pytest tests/integration -q
+```
+Last run: **10 passed** (all nine fault types: apply, inspect, rollback, verify).
+
+Frontend:
+```powershell
+cd frontend
+npm run typecheck   # tsc --noEmit
+npm test            # vitest: 57 tests (stream client, reducer, pages, activity log)
+npm run build
+```
+Last run: type check clean, **57 passed** with no warnings, build OK with no warnings.
+
+Real browser (headless Chromium via Playwright; needs the backend running and `npx playwright install chromium` once):
+```powershell
+cd frontend
+npm run e2e                                                   # against the dev server on :5173
+$env:E2E_BASE_URL = "http://127.0.0.1:8000"; npm run e2e      # against the built dashboard served by the API
+```
+It opens all seven pages, previews a scenario, starts a **dry run** (never a real fault), follows its activity log to the end, opens an experiment from history, and fails on any console error or warning, uncaught exception, failed request or HTTP status >= 400. Set `E2E_API_TOKEN` when the server has `API_TOKEN`; it then also checks that nothing loads without the token. Last run: clean in all three configurations (dev server, production build, production build with token auth).
+
+CI (`.github/workflows/ci.yml`) runs the backend suite, the real-Docker suite on the runner's own daemon, and the frontend type check, tests and build. The browser smoke test is not in CI because it needs a running Ditto stack.
 
 ## Troubleshooting
 

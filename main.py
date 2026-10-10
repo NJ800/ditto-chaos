@@ -20,6 +20,9 @@ Commands:
   python main.py analyze <exp.json>     -- AI/deterministic findings + remediation plan
   python main.py report                 -- list saved experiments and their analyses
   python main.py serve                  -- run the dashboard's backend API (api.py)
+  python main.py faults                 -- list fault types, bounds, support status
+  python main.py scenario <file.json>   -- validate/preview a multi-fault scenario (no injection)
+  python main.py recover                -- clean up after a crashed run and clear the lockout
 """
 from __future__ import annotations
 
@@ -172,14 +175,106 @@ def cmd_run(args) -> int:
     return 0
 
 
+def port_in_use(host: str, port: int) -> bool:
+    """True if something already accepts connections on host:port."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1.0)
+        return s.connect_ex((host if host not in ("0.0.0.0", "") else "127.0.0.1", port)) == 0
+
+
 def cmd_serve(args) -> int:
+    if config.API_HOST not in ("127.0.0.1", "localhost", "::1") and not config.API_TOKEN:
+        print(f"[serve] REFUSED: API_HOST={config.API_HOST} is not loopback and no API_TOKEN is set. "
+              f"The API can inject faults; set API_TOKEN in .env before exposing it.")
+        return 2
+    if port_in_use(config.API_HOST, config.API_PORT):
+        # Checked up front: uvicorn's own failure is a bare "[Errno 10048]" after its
+        # startup banner, which reads like an application error rather than "port taken".
+        print(f"[serve] REFUSED: port {config.API_PORT} on {config.API_HOST} is already in use -- "
+              f"another `main.py serve` is probably still running.\n"
+              f"        Find it:  Get-NetTCPConnection -LocalPort {config.API_PORT} -State Listen\n"
+              f"        Or run on another port:  $env:API_PORT=8001; python main.py serve "
+              f"(and set VITE_API_BASE_URL for the dashboard)")
+        return 2
+
     import uvicorn
 
     import api
     print(f"[serve] starting API on http://{config.API_HOST}:{config.API_PORT} "
-          f"(frontend origins allowed: {config.FRONTEND_ORIGINS})")
+          f"(frontend origins allowed: {config.FRONTEND_ORIGINS}; "
+          f"token auth {'ON' if config.API_TOKEN else 'off, loopback only'})")
+    if api.dashboard_built():
+        print(f"[serve] dashboard (frontend/dist) is served at http://{config.API_HOST}:{config.API_PORT}/")
+    else:
+        print("[serve] no built dashboard found: run `npm run build` in frontend/ to serve it from this "
+              "port, or use the dev server (`npm run dev`, http://localhost:5173)")
     uvicorn.run(api.app, host=config.API_HOST, port=config.API_PORT)
     return 0
+
+
+def cmd_faults(args) -> int:
+    import faults
+    for f in faults.catalog():
+        state = "supported" if f["supported"] else "NOT SUPPORTED"
+        params = ", ".join(f"{p['name']} {p['minimum']:g}..{p['maximum']:g}{p['unit']}" for p in f["params"])
+        print(f"  {f['name']:16s} {state:14s} {f['category']:9s} {params}")
+        if not f["supported"]:
+            print(f"      reason: {f['unsupported_reason']}")
+        elif not f["live_verified"]:
+            print(f"      note: {f['verification_note']}")
+    return 0
+
+
+def cmd_scenario(args) -> int:
+    """Validate (and optionally preflight) a scenario JSON file. Never injects."""
+    import scenario
+    with open(args.file, encoding="utf-8") as f:
+        scn = scenario.Scenario(**json.load(f))
+    dep_map = None
+    if os.path.isfile("dependency_map.json"):
+        with open("dependency_map.json", encoding="utf-8") as f:
+            dep_map = json.load(f)
+    if args.preflight:
+        result = asyncio.run(scenario.preflight_check(scn, dep_map))
+        report = result["validation"]
+    else:
+        result, report = None, scenario.validate(scn, dep_map)
+    for a in report["actions"]:
+        print(f"  {a['id']}: {a['fault']} on {a['target']} params={a['params']} "
+              f"t={a['start_offset_s']:g}s..{a['end_s']}s intensity={a['intensity']}")
+        for c in a["commands"]:
+            print(f"      would run: {c}")
+    for w in report["warnings"]:
+        print(f"  warning: {w['message']}")
+    for e in report["errors"]:
+        print(f"  ERROR: {e['message']}")
+    print(f"[scenario] policy check: {'OK' if report['ok'] else 'REFUSED'}; rollback order "
+          f"{report['rollback_order']}; nothing was executed")
+    if result is not None:
+        for r in result["results"]:
+            print(f"  preflight {r['id']} {r['fault']}@{r['target']}: {'ready' if r['ok'] else r['detail']}")
+        if result["error"]:
+            print(f"  preflight: {result['error']}")
+        return 0 if result["ok"] else 1
+    return 0 if report["ok"] else 1
+
+
+def cmd_recover(args) -> int:
+    """Replay the recovery journal: roll back and verify anything an earlier run left."""
+    import scenario
+    if not scenario.list_journals() and scenario.read_lockout() is None:
+        print("[recover] nothing to recover: no journal and no lockout")
+        return 0
+    result = asyncio.run(scenario.recover_orphans())
+    for r in result["recovered"]:
+        print(f"  cleaned: {r['fault']} on {r['target']} ({r['detail']})")
+    for f in result["failed"]:
+        print(f"  NOT VERIFIED: {f.get('fault')} on {f.get('target')}: {f['error']}")
+        for m in f.get("manual", []):
+            print(f"      run manually: {m}")
+    print("[recover] lockout cleared" if result["lockout"] is None else "[recover] recovery is still REQUIRED")
+    return 0 if result["lockout"] is None else 1
 
 
 def cmd_analyze(args) -> int:
@@ -209,8 +304,14 @@ def cmd_report(args) -> int:
         print(f"[report] no saved experiments in {config.EXPERIMENTS_DIR}/")
         return 1
     for path in files:
-        with open(path, encoding="utf-8") as f:
-            rec = json.load(f)
+        try:
+            with open(path, encoding="utf-8") as f:
+                rec = json.load(f)
+            if not isinstance(rec, dict):
+                raise ValueError("not an experiment record")
+        except (OSError, ValueError) as e:
+            print(f"  {os.path.basename(path)}: UNREADABLE ({e})")
+            continue
         analysis_path = os.path.join(config.REPORTS_DIR, f"experiment_{rec.get('id')}_analysis.json")
         analyzed = "analyzed" if os.path.isfile(analysis_path) else "not yet analyzed"
         print(f"  {rec.get('id')}: fault={rec.get('fault')} target={rec.get('target')} "
@@ -249,6 +350,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="must be 1 -- see this command's help text for why")
 
     sub.add_parser("serve", help="run the dashboard's backend API (api.py) with uvicorn")
+    sub.add_parser("faults", help="list every fault type, its bounds, and whether it is supported")
+    p = sub.add_parser("scenario", help="validate a multi-fault scenario JSON file (never injects)")
+    p.add_argument("file")
+    p.add_argument("--preflight", action="store_true", help="also check the real containers (read-only)")
+    sub.add_parser("recover", help="roll back and verify anything a crashed run left behind")
     return ap
 
 
@@ -256,7 +362,8 @@ def main() -> int:
     args = build_parser().parse_args()
     handlers = {"doctor": cmd_doctor, "map": cmd_map, "health": cmd_health,
                "baseline": cmd_baseline, "plan": cmd_plan, "run": cmd_run,
-               "analyze": cmd_analyze, "report": cmd_report, "serve": cmd_serve}
+               "analyze": cmd_analyze, "report": cmd_report, "serve": cmd_serve,
+               "faults": cmd_faults, "scenario": cmd_scenario, "recover": cmd_recover}
     return handlers[args.command](args)
 
 

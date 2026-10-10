@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import json
 import math
 import os
@@ -54,8 +55,8 @@ import httpx
 import config
 import probe
 
-SCHEMA_VERSION = "1.0"
-GUARD_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.1"   # 1.1 adds the additive `events` activity log
+GUARD_VERSION = "1.2.0"
 
 COMPOSE_PROJECT = os.getenv("COMPOSE_PROJECT", "docker")
 ALLOWLIST = {"gateway", "things", "things-search", "policies", "connectivity", "mongodb"}
@@ -99,26 +100,61 @@ def utc_now_iso() -> str:
 
 
 # ---------------------------------------------------------------- docker helpers
+# An experiment installs a callback here so every command issued on its behalf -- by this
+# module or by faults.py -- is reported to its activity log, without each caller having
+# to pass one. Tasks and worker threads started by the experiment inherit it.
+_command_sink: "contextvars.ContextVar" = contextvars.ContextVar("guard_command_sink", default=None)
+# When true, run_cmd executes NOTHING, whatever its dry_run argument says (scenario dry runs).
+_force_dry_run: "contextvars.ContextVar[bool]" = contextvars.ContextVar("guard_force_dry_run", default=False)
+
+
+def _report_command(on_command, info: dict) -> None:
+    cb = on_command or _command_sink.get()
+    if cb is None:
+        return
+    try:
+        cb(info)
+    except Exception as e:  # noqa: BLE001 -- reporting a command must never change its outcome
+        print(f"[guard] WARNING: command observer failed: {type(e).__name__}: {e}", flush=True)
+
+
 async def run_cmd(args: list[str], dry_run: bool = False, check: bool = True,
-                   timeout: float = DOCKER_CMD_TIMEOUT_S) -> str:
+                   timeout: float = DOCKER_CMD_TIMEOUT_S, on_command=None) -> str:
     """Run a subprocess off the event loop thread, with an explicit timeout.
 
     dry_run short-circuits BEFORE any subprocess is started -- dry-run performs
     zero Docker interaction, not even a read-only one.
+
+    `on_command` (optional; defaults to the experiment-scoped observer, if any) is called
+    once with {argv, executed, returncode, stderr, timed_out, timeout_s, duration_ms}. It
+    reports what happened; it cannot alter it, and callers that pass nothing behave
+    exactly as before.
     """
-    print("[guard] $ " + " ".join(args), flush=True)
-    if dry_run:
+    if dry_run or _force_dry_run.get():
+        # Labelled explicitly: an unlabelled "$ docker kill ..." line is indistinguishable
+        # from a real execution when read back in a terminal or a saved log.
+        print("[guard] (dry-run, NOT executed) $ " + " ".join(args), flush=True)
+        _report_command(on_command, {"argv": list(args), "executed": False})
         return ""
+    print("[guard] $ " + " ".join(args), flush=True)
+    t0 = time.monotonic()
     try:
         r = await asyncio.to_thread(subprocess.run, args, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
+        _report_command(on_command, {"argv": list(args), "executed": True, "returncode": None, "timed_out": True,
+                                     "timeout_s": timeout, "duration_ms": int((time.monotonic() - t0) * 1000)})
         msg = f"command timed out after {timeout}s: {' '.join(args)}"
         if check:
             raise GuardError(msg) from e
         print(f"[guard] WARNING (non-fatal): {msg}", flush=True)
         return ""
     except FileNotFoundError as e:
+        _report_command(on_command, {"argv": list(args), "executed": False, "returncode": None,
+                                     "stderr": "docker CLI not found on PATH"})
         raise GuardError("docker CLI not found on PATH -- is Docker installed and on PATH?") from e
+    _report_command(on_command, {"argv": list(args), "executed": True, "returncode": r.returncode,
+                                 "stderr": (r.stderr or "").strip()[:400] if r.returncode != 0 else "",
+                                 "timed_out": False, "duration_ms": int((time.monotonic() - t0) * 1000)})
     if r.returncode != 0:
         if check:
             raise GuardError(f"command failed ({r.returncode}): {' '.join(args)}\n{r.stderr.strip()}")
@@ -197,20 +233,26 @@ class KillFault:
         return  # resolve_container() already verified it is running
 
     async def inject(self) -> None:
-        await run_cmd(["docker", "kill", self.container.name], self.dry_run)
+        # Addressed by full id: a name can be re-used by a different container, an id cannot.
+        await run_cmd(["docker", "kill", self.container.id], self.dry_run)
 
     async def revert(self) -> None:
         if self.dry_run:
-            await run_cmd(["docker", "start", self.container.name], True)
+            await run_cmd(["docker", "start", self.container.id], True)
             return
         current_id = await _current_container_id(self.container.name)
-        if current_id is not None and current_id != self.container.id:
+        if current_id is None:
+            raise RollbackError(
+                f"could not read the current id of '{self.container.name}' (container removed, or "
+                f"Docker did not answer) -- refusing to start anything by name without confirming "
+                f"it is the container that was killed. Check `docker ps -a` and start it manually.")
+        if current_id != self.container.id:
             raise RollbackError(
                 f"container '{self.container.name}' now has id {current_id[:12]}, not the "
                 f"original {self.container.id[:12]} -- refusing to start what may be a different "
                 f"container. Investigate manually (something else may have recreated it).")
-        await run_cmd(["docker", "start", self.container.name])
-        if not await _wait_running(self.container.name, timeout=15):
+        await run_cmd(["docker", "start", self.container.id])
+        if not await _wait_running(self.container.id, timeout=15):
             raise RollbackError(f"'docker start' returned success but '{self.container.name}' did not "
                                  f"reach the running state within 15s; check `docker logs {self.container.name}`.")
 
@@ -584,7 +626,7 @@ async def run_experiment(fault, target: str, container: ContainerRef, th: Thresh
         "thresholds": asdict(th),
         "baseline": None, "baseline_source": None,
         "started_at_utc": utc_now_iso(), "ended_at_utc": None,
-        "started": None,
+        "started": None, "simulated": False,
         "injected": False, "injection_error": None,
         "aborted": False, "abort_reason": None, "detected_s": None,
         "reverted": False, "reverted_at": None,
@@ -592,7 +634,19 @@ async def run_experiment(fault, target: str, container: ContainerRef, th: Thresh
         "recovery_s": None, "recovery_outcome": None,
         "error": None, "timeline": [], "during": None,
         "python_version": sys.version.split()[0],
+        "events": [], "event_seq": 0,
     }
+    import activity  # local import: activity.py imports this module
+    sink_token = _command_sink.set(activity.command_sink(record))
+    mode = "DRY RUN: no command will be executed" if fault.dry_run else "REAL fault injection"
+    activity.emit(record, "info", f"Experiment {exp_id} started ({mode}): '{fault.name}' on '{target}'.",
+                  dry_run=bool(fault.dry_run), fault=fault.name, target=target, params=fault.params)
+    activity.emit(record, "info",
+                  (f"Target '{target}' is on the allowlist; using synthetic container '{container.name}' "
+                   f"because this is a dry run (Docker is not contacted)." if fault.dry_run else
+                   f"Target '{target}' is on the allowlist and resolved to container '{container.name}' "
+                   f"(id {container.id[:12]}), which is running."),
+                  container=container.name, container_id=container.id, synthetic=bool(fault.dry_run))
 
     ids = config.all_car_ids()
     try:
@@ -608,6 +662,7 @@ async def run_experiment(fault, target: str, container: ContainerRef, th: Thresh
                     row = timeout_row(phase)
                 row["phase"] = phase
                 record["timeline"].append(row)
+                activity.health(record, row)
                 print(f"[guard] {phase:9s} direct={'OK ' if row['direct_ok'] else 'ERR'} "
                       f"{row['direct_ms']:7.1f}ms search={'OK ' if row['search_ok'] else 'ERR'} "
                       f"stale95={row['stale_p95_s']} lost={row['lost_acked']}", flush=True)
@@ -625,25 +680,35 @@ async def run_experiment(fault, target: str, container: ContainerRef, th: Thresh
                       f"weak.", flush=True)
             pre = [await tick("before") for _ in range(pre_ticks)]
             if not all(r["direct_ok"] and r["search_ok"] for r in pre[-min(2, len(pre)):]):
+                activity.emit(record, "decision", "Refusing to inject: Ditto was not healthy on the pre-check "
+                                                  "ticks, so a fault would be indistinguishable from the existing problem.")
                 raise GuardError("Ditto is not healthy BEFORE the experiment (direct and/or search "
                                   "failing); refusing to inject. Check `docker ps` and Ditto logs first.")
+            activity.emit(record, "info", f"Pre-check passed: Ditto answered direct reads and searches on the "
+                                          f"last {min(2, len(pre))} of {len(pre)} tick(s).")
 
             file_baseline = None if fresh_baseline else load_baseline()
             baseline, source = (file_baseline, "file") if file_baseline is not None \
                 else (probe.summarize(pre), "fresh")
             validate_baseline(baseline, source, max_baseline_age_s)
             record["baseline"], record["baseline_source"] = baseline, source
+            activity.thresholds(record, baseline, th, source)
 
             # ---- INJECTING / MONITORING / REVERTING ----
             if stop_event is not None and stop_event.is_set():
                 # Stop requested before anything was touched -- nothing to revert.
                 record["state"] = STATE_ABORTED
+                activity.emit(record, "decision", "Manual stop requested before injection: nothing was "
+                                                  "touched, so there is nothing to revert.")
                 record["aborted"], record["abort_reason"] = True, "manual stop (requested before injection)"
                 record["recovery_outcome"] = "skipped_manual_abort"
                 manual_abort = True
             else:
                 record["state"] = STATE_INJECTING
+                activity.emit(record, "info", f"Running the '{fault.name}' fault's read-only preflight checks.")
                 await fault.preflight()
+                activity.emit(record, "info", f"Preflight passed. Injecting '{fault.name}' into '{target}'"
+                                              + (" (dry run: commands are only shown)." if fault.dry_run else "."))
                 record["started"] = time.time()
                 started_mono = time.monotonic()
                 manual_abort = False
@@ -654,47 +719,84 @@ async def run_experiment(fault, target: str, container: ContainerRef, th: Thresh
                         await fault.inject()
                     except Exception as e:
                         record["injection_error"] = str(e)
+                        activity.emit(record, "error", f"Injection failed: {e}. The fault may be partly "
+                                                       f"applied, so a revert will be attempted.")
                         raise
                     print(f"[guard] >>> fault '{fault.name}' injected into {target}", flush=True)
 
                     record["state"] = STATE_MONITORING
+                    activity.emit(record, "info",
+                                  (f"Dry run: the fault was NOT applied. Monitoring Ditto for up to {max_duration:g}s "
+                                   f"exactly as a real run would." if fault.dry_run else
+                                   f"Fault applied. Monitoring Ditto every {config.PROBE_INTERVAL_S:g}s for up to "
+                                   f"{max_duration:g}s; any stop condition reverts immediately."))
                     window: list[dict] = []
                     while time.monotonic() - started_mono < max_duration:
                         window.append(await tick("fault"))
                         if stop_event is not None and stop_event.is_set():
                             record["aborted"], record["abort_reason"] = True, "manual stop (requested during monitoring)"
                             record["detected_s"] = round(time.monotonic() - started_mono, 2)
+                            activity.emit(record, "decision", "Manual stop requested from the dashboard: "
+                                                              "reverting the fault now.", reason="manual_stop")
                             print("[guard] !!! MANUAL STOP requested -> reverting", flush=True)
                             break
                         breached, reason = check_breach(window, baseline, th)
                         if breached:
                             record["aborted"], record["abort_reason"] = True, reason
                             record["detected_s"] = round(time.monotonic() - started_mono, 2)
+                            activity.emit(record, "decision", f"Kill switch triggered: {reason}. Reverting the "
+                                                              f"fault now.", reason=reason, kill_switch=True)
                             print(f"[guard] !!! KILL SWITCH: {reason} -> reverting", flush=True)
                             break
-                except KeyboardInterrupt:
+                        activity.emit(record, "decision", activity.within_limits(window[-1], baseline, th))
+                    else:
+                        activity.emit(record, "decision", f"Maximum duration of {max_duration:g}s reached without "
+                                                          f"a stop condition: reverting the fault.",
+                                      reason="max_duration")
+                except (KeyboardInterrupt, asyncio.CancelledError) as e:
+                    # On Python 3.11+ asyncio.run() delivers Ctrl+C as a task cancellation,
+                    # not a KeyboardInterrupt, and an API shutdown cancels the task the same
+                    # way. Both must revert and still hand back a record to save.
                     manual_abort = True
-                    record["aborted"], record["abort_reason"] = True, "manual stop (Ctrl+C)"
+                    record["aborted"], record["abort_reason"] = True, _interrupt_reason(e)
+                    activity.emit(record, "decision", f"Interrupted ({_interrupt_reason(e)}): reverting the fault.")
                 except Exception as e:
                     record["error"] = record["error"] or f"{type(e).__name__}: {e}"
+                    if not record["injection_error"]:
+                        activity.emit(record, "error", f"Unexpected error while the fault was active: "
+                                                       f"{type(e).__name__}: {e}. Reverting.")
                 finally:
                     # ALWAYS attempt + verify revert because record["injected"] is True.
                     record["state"] = STATE_REVERTING
+                    activity.emit(record, "info",
+                                  (f"Dry run: showing the revert commands for '{fault.name}' on '{target}'."
+                                   if fault.dry_run else
+                                   f"Reverting '{fault.name}' on '{target}' and verifying the result."))
                     try:
                         await fault.revert()
                         record["reverted"] = True
                         record["rollback_verified"] = True
                         record["reverted_at"] = time.time()
+                        activity.emit(record, "info",
+                                      ("Dry run: nothing was applied, so there was nothing to revert."
+                                       if fault.dry_run else
+                                       f"Revert verified: '{fault.name}' is confirmed removed from '{target}'."),
+                                      verified=not fault.dry_run)
                         print("[guard] <<< fault reverted (verified)", flush=True)
-                    except KeyboardInterrupt:
+                    except (KeyboardInterrupt, asyncio.CancelledError):
                         print("[guard] !!! interrupted again during rollback -- the fault may still be "
                               f"ACTIVE on '{target}'. See README 'Manual recovery' for the exact commands.",
                               flush=True)
                         record["rollback_error"] = "interrupted during rollback (second Ctrl+C)"
                         record["error"] = _join(record["error"], record["rollback_error"])
+                        activity.emit(record, "error", f"Revert was interrupted: the fault may still be ACTIVE "
+                                                       f"on '{target}'. Recover it manually.", verified=False)
                     except Exception as e:
                         record["rollback_error"] = str(e)
                         record["error"] = _join(record["error"], f"REVERT FAILED: {e}")
+                        activity.emit(record, "error", f"Revert could NOT be verified: {e}. The fault may still "
+                                                       f"be active on '{target}'; recovery is not confirmed.",
+                                      verified=False)
                         print(f"[guard] REVERT FAILED, fix manually: {e}", flush=True)
 
             # ---- Decide what happens after revert ----
@@ -707,41 +809,78 @@ async def run_experiment(fault, target: str, container: ContainerRef, th: Thresh
                 record["state"] = STATE_VERIFYING_RECOVERY
                 healthy_streak, rec_start_mono = 0, time.monotonic()
                 recovered = False
+                activity.emit(record, "info", f"Verifying recovery: {RECOVERY_STREAK} consecutive healthy ticks "
+                                              f"are required within {recovery_timeout:g}s.")
                 while time.monotonic() - rec_start_mono < recovery_timeout:
                     row = await tick("recovery")
-                    healthy_streak = healthy_streak + 1 if is_healthy(row, baseline, th) else 0
+                    ok_now = is_healthy(row, baseline, th)
+                    healthy_streak = healthy_streak + 1 if ok_now else 0
+                    activity.emit(record, "decision",
+                                  f"{healthy_streak}/{RECOVERY_STREAK} healthy ticks."
+                                  if ok_now else
+                                  f"Not healthy yet (requests failing, latency above the recovery limit, or data "
+                                  f"stale): streak reset to 0/{RECOVERY_STREAK}.",
+                                  healthy_streak=healthy_streak, required=RECOVERY_STREAK)
                     if healthy_streak >= RECOVERY_STREAK:
                         record["recovery_s"] = round(
                             time.monotonic() - rec_start_mono - (RECOVERY_STREAK - 1) * config.PROBE_INTERVAL_S, 2)
                         record["recovery_outcome"] = "recovered"
                         recovered = True
+                        activity.emit(record, "info", f"Recovery verified: Ditto was healthy again "
+                                                      f"{record['recovery_s']}s after the revert.",
+                                      recovery_s=record["recovery_s"])
                         break
                 if not recovered:
                     record["recovery_s"] = None
                     record["recovery_outcome"] = "timeout"
                     record["error"] = _join(record["error"], f"not recovered within {recovery_timeout}s")
+                    activity.emit(record, "error", f"Recovery NOT verified: Ditto did not return to a healthy "
+                                                   f"state within {recovery_timeout:g}s of the revert.")
                 record["state"] = STATE_COMPLETED if recovered else STATE_RECOVERY_TIMEOUT
 
             fault_rows = [r for r in record["timeline"] if r["phase"] == "fault"]
             record["during"] = probe.summarize(fault_rows) if fault_rows else None
 
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError) as e:
         record["aborted"] = True
-        record["abort_reason"] = record["abort_reason"] or "manual stop (Ctrl+C)"
+        record["abort_reason"] = record["abort_reason"] or _interrupt_reason(e)
         record["state"] = STATE_ABORTED if record["state"] in (STATE_PRECHECK, STATE_BASELINE) else record["state"]
     except GuardError as e:
         record["error"] = str(e)
         record["state"] = STATE_ABORTED if record["state"] in (STATE_PRECHECK, STATE_BASELINE) else STATE_FAILED
+        activity.emit(record, "error", f"Stopped: {e}")
         print(f"[guard] ERROR: {e}", flush=True)
     except Exception as e:
         record["error"] = _join(record["error"], f"{type(e).__name__}: {e}")
         record["state"] = STATE_FAILED
+        activity.emit(record, "error", f"Unexpected error: {type(e).__name__}: {e}")
         print(f"[guard] UNEXPECTED ERROR: {e}", flush=True)
+    finally:
+        _command_sink.reset(sink_token)
 
+    if fault.dry_run:
+        # Nothing was touched: `injected` above only registered rollback responsibility
+        # for the (no-op) dry-run fault object. Saved as-is, the record read "injected,
+        # reverted, rollback verified" and was counted as a real run by the planner.
+        record["simulated"] = True
+        record["injected"] = record["reverted"] = record["rollback_verified"] = False
+        record["reverted_at"] = None
+
+    outcome = {STATE_COMPLETED: "completed and recovery was verified", STATE_ABORTED: "was aborted",
+               STATE_FAILED: "FAILED", STATE_RECOVERY_TIMEOUT: "ended without verified recovery"}.get(
+        record["state"], f"ended in state {record['state']}")
+    activity.emit(record, "error" if record["state"] in (STATE_FAILED, STATE_RECOVERY_TIMEOUT) else "info",
+                  f"Experiment {outcome}."
+                  + (" This was a dry run: no command was executed and nothing was changed." if fault.dry_run else ""),
+                  final=True, state=record["state"])
     record["ended_at_utc"] = utc_now_iso()
     if on_update is not None:
         on_update(record)
     return record
+
+
+def _interrupt_reason(exc: BaseException) -> str:
+    return "manual stop (Ctrl+C)" if isinstance(exc, KeyboardInterrupt)         else "cancelled (Ctrl+C or shutdown while the experiment task was running)"
 
 
 def _join(a: str | None, b: str) -> str:

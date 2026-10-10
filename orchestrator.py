@@ -65,6 +65,14 @@ class _RunState:
     error: str | None = None
     stop_event: "asyncio.Event | None" = None
     started_at: float | None = None
+    # ---- scenario (v2) path ----
+    kind: str = "single"
+    scenario_proposal: dict | None = None
+    plan_ctx: dict | None = None
+    learning: dict | None = None
+    agent_runs: list | None = None
+    task: "asyncio.Task | None" = None
+    stop_requested: bool = False
 
 
 _state = _RunState()
@@ -79,6 +87,8 @@ def get_status() -> dict:
             "experiment_id": s.experiment_id, "record": s.record_snapshot,
             "analysis": s.analysis, "remediation_plan": s.remediation_plan,
             "error": s.error, "started_at": s.started_at,
+            "kind": s.kind, "scenario_proposal": s.scenario_proposal, "learning": s.learning,
+            "agent_runs": s.agent_runs, "stop_requested": s.stop_requested,
         }
 
 
@@ -106,6 +116,8 @@ def _recent_experiments(limit: int = 10) -> list[dict]:
                 rec = json.load(f)
         except (OSError, ValueError):
             continue
+        if not isinstance(rec, dict) or rec.get("dry_run") or rec.get("simulated"):
+            continue  # a dry run touched nothing: it is not a target that has "been tried"
         out.append({"id": rec.get("id"), "fault": rec.get("fault"), "target": rec.get("target"),
                     "state": rec.get("state"), "aborted": rec.get("aborted"),
                     "recovery_outcome": rec.get("recovery_outcome")})
@@ -230,11 +242,19 @@ async def _execute(proposal: dict, dry_run: bool, stop_event: "asyncio.Event") -
         _state.record_snapshot = record
         _state.status = STATUS_ANALYZING
 
-    dep_map = _load_or_build_dependency_map()
-    analysis = resilience_agent.analyze_experiment(record, dep_map)
-    resilience_agent.save_report(analysis)
-    plan = remediation_planner.build_plan(analysis)
-    remediation_planner.save_plan(plan)
+    try:
+        dep_map = _load_or_build_dependency_map()
+        analysis = resilience_agent.analyze_experiment(record, dep_map)
+        resilience_agent.save_report(analysis)
+        plan = remediation_planner.build_plan(analysis)
+        remediation_planner.save_plan(plan)
+    except Exception as e:
+        # The experiment itself finished and is saved; only the analysis failed. Without
+        # this the status stayed "analyzing" forever.
+        with _lock:
+            _state.status = STATUS_ERROR
+            _state.error = f"experiment saved to {path}, but analysis failed: {type(e).__name__}: {e}"
+        raise
 
     with _lock:
         _state.analysis, _state.remediation_plan = analysis, plan
@@ -281,6 +301,7 @@ def request_stop() -> bool:
         if _state.status != STATUS_RUNNING or _state.stop_event is None:
             return False
         _state.stop_event.set()
+        _state.stop_requested = True
         return True
 
 
@@ -393,3 +414,301 @@ def get_remediation_view(experiment_id: str) -> dict:
         items.append({**item, "operator_decision": decisions.get(str(i), {}).get("decision")
                       if item["category"] != "A" else "not_applicable_already_automated"})
     return {**plan, "items": items, "verification": decisions.get("_verification")}
+
+
+# ================================================================ scenario path (schema 2.0)
+# Multi-fault scenarios, the agent pipeline, and the knowledge store. Shares `_state` with
+# the legacy single-fault path above, so there is still exactly ONE run at a time in this
+# process no matter which entry point started it.
+import agents  # noqa: E402
+import learning  # noqa: E402
+import scenario  # noqa: E402
+import store  # noqa: E402
+from events import bus  # noqa: E402
+
+
+class OrchestratorConflict(OrchestratorError):
+    """The request is valid but cannot be honoured in the current state (HTTP 409)."""
+
+
+_recent_requests: dict[str, dict] = {}   # request_id -> response, for duplicate submissions
+_REQUEST_MEMORY = 50
+
+
+def save_record(record: dict) -> str:
+    """Atomic write into config.EXPERIMENTS_DIR (guard.save() uses its own import-time copy)."""
+    os.makedirs(config.EXPERIMENTS_DIR, exist_ok=True)
+    path = os.path.join(config.EXPERIMENTS_DIR, f"{record['id']}.json")
+    tmp = path + f".tmp-{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(guard._sanitize(record), f, indent=2, allow_nan=False, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    return path
+
+
+def _history() -> tuple[list[dict], str | None]:
+    """Stored history, falling back to reading the JSON files directly when the
+    knowledge store is unavailable. Returns (cases, degraded_reason)."""
+    try:
+        store.sync_from_files()
+        return store.history(), None
+    except store.StoreError as e:
+        cases = []
+        for path in sorted(glob.glob(os.path.join(config.EXPERIMENTS_DIR, "*.json"))):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    rec = json.load(f)
+                if isinstance(rec, dict) and rec.get("id"):
+                    cases.append(learning.to_case(rec))
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+        return cases, str(e)
+
+
+def gather_context(policy: dict | None = None) -> dict:
+    history, degraded = _history()
+    try:
+        pending = store.pending_validation_signatures()
+    except store.StoreError:
+        pending = set()
+    return {"dep_map": _load_or_build_dependency_map(), "health": probe.current_health(),
+            "baseline": guard.load_baseline(), "history": history, "store_degraded": degraded,
+            "pending_validation": pending, "policy": policy, "outputs": {}}
+
+
+def _timeline(type_: str, data: dict, experiment_id: str | None = None, proposal_id: str | None = None) -> None:
+    try:
+        store.add_timeline(type_, data, experiment_id, proposal_id)
+    except store.StoreError as e:
+        print(f"[orchestrator] timeline not persisted ({type_}): {e}", flush=True)
+
+
+async def generate_scenario_plan(policy: dict | None = None, mode: str | None = None) -> dict:
+    """Run the plan pipeline (risk -> fault_injection). Read-only."""
+    proposal_id = uuid.uuid4().hex[:12]
+    ctx = await asyncio.to_thread(gather_context, policy)
+    result = await agents.coordinator.plan(ctx, proposal_id)
+    proposal = result["proposal"]
+    if proposal is None:
+        failed = next((r for r in result["runs"] if r["agent"] == "fault_injection"), {})
+        raise OrchestratorError(f"no proposal could be produced: {failed.get('error') or 'unknown error'}")
+    proposal = {"proposal_id": proposal_id, "mode": mode, "store_degraded": ctx["store_degraded"], **proposal}
+    with _lock:
+        _state.scenario_proposal, _state.plan_ctx = proposal, ctx
+        if _state.status not in (STATUS_RUNNING, STATUS_ANALYZING):
+            _state.status = STATUS_PLANNED
+    _timeline("proposed", {"signature": proposal["validation"]["signature"], "method": proposal["method"],
+                           "hypothesis": proposal["hypothesis"]}, proposal_id=proposal_id)
+    bus.publish("proposal", {"proposal_id": proposal_id, "signature": proposal["validation"]["signature"],
+                             "method": proposal["method"]})
+    return proposal
+
+
+def get_scenario_proposal() -> dict | None:
+    with _lock:
+        return _state.scenario_proposal
+
+
+def _on_event(kind: str, data: dict) -> None:
+    bus.publish(kind, data)
+    if kind in ("experiment", "alert"):
+        _timeline(kind, data, data.get("experiment_id"))
+
+
+def _on_update(record: dict) -> None:
+    with _lock:
+        record["recovery_state"] = agents.recovery_state(record, _state.stop_requested)
+        _state.experiment_id = record.get("id")
+        _state.record_snapshot = dict(record)
+
+
+def start_scenario(scn: "scenario.Scenario", authorization: "scenario.Authorization | None", *,
+                   policy: dict | None = None, proposal: dict | None = None, mode: str | None = None,
+                   source: str = "operator", request_id: str | None = None, dry_run: bool = False) -> dict:
+    """Validate and claim SYNCHRONOUSLY, then run in the background. Raises
+    OrchestratorConflict / scenario.ScenarioRejected immediately for anything refused.
+    Must be called on the event loop thread. Returns {experiment_id, task, duplicate}.
+
+    dry_run=True walks the same lifecycle with real health probes but executes no Docker
+    command; it needs no authorization and is never counted as evidence."""
+    with _lock:
+        if request_id and request_id in _recent_requests:
+            return {**_recent_requests[request_id], "duplicate": True, "task": None}
+        if _state.status in (STATUS_RUNNING, STATUS_ANALYZING):
+            raise OrchestratorConflict("an experiment is already running or being analysed -- "
+                                       "stop it or wait for it to finish")
+        previous = _state.status
+        _state.status = STATUS_RUNNING     # claimed: a second caller is refused from here on
+    try:
+        health = probe.current_health()
+        if not dry_run and health.get("status") == "unknown":
+            raise OrchestratorConflict("current health is UNKNOWN (probe.py is not writing fresh data) -- "
+                                       "refusing to inject with no independent monitoring. Start `python probe.py`.")
+        ctx = None
+        if proposal is not None:
+            with _lock:
+                same = (_state.scenario_proposal or {}).get("proposal_id") == proposal.get("proposal_id")
+                ctx = _state.plan_ctx if same else None
+        if ctx is None:
+            ctx = gather_context(policy)
+        ctx["policy"] = policy
+        prediction = (proposal or {}).get("prediction") or learning.predict(
+            [a.model_dump() for a in scn.actions], ctx["history"])
+        stop_event = asyncio.Event()
+        keep = ("proposal_id", "method", "objective", "hypothesis", "ranking", "confidence")
+        run = scenario.ScenarioRun(
+            scn, authorization, dep_map=ctx["dep_map"], policy=policy, stop_event=stop_event,
+            on_event=_on_event, on_update=_on_update, dry_run=dry_run,
+            meta={"mode": mode, "source": "dry_run" if dry_run else source, "prediction": prediction,
+                  "proposal": {k: proposal.get(k) for k in keep} if proposal else None})
+        report = run.prepare()
+    except BaseException:
+        with _lock:
+            _state.status = previous
+        raise
+
+    proposal_id = (proposal or {}).get("proposal_id")
+    with _lock:
+        _state.kind, _state.stop_event, _state.stop_requested = "scenario", stop_event, False
+        _state.started_at, _state.error = time.time(), None
+        _state.analysis = _state.remediation_plan = _state.learning = _state.agent_runs = None
+        _state.experiment_id, _state.record_snapshot = run.id, dict(run.record)
+    if proposal_id:
+        try:
+            store.link_proposal(proposal_id, run.id)
+        except store.StoreError:
+            pass
+    _timeline("validated", {"signature": report["signature"], "warnings": len(report["warnings"]),
+                            "cumulative_intensity": report["cumulative_intensity"]}, run.id)
+    if not dry_run:
+        _timeline("authorized", authorization.model_dump(), run.id)
+        try:
+            store.audit(authorization.actor, "scenario_authorized",
+                        {"experiment_id": run.id, "kind": authorization.kind, "signature": report["signature"]})
+        except store.StoreError:
+            pass
+    try:
+        task = asyncio.create_task(_execute_scenario(run, ctx), name=f"scenario-{run.id}")
+    except RuntimeError as e:
+        run.release()
+        with _lock:
+            _state.status, _state.error = STATUS_ERROR, f"could not schedule the scenario: {e}"
+        raise
+    response = {"experiment_id": run.id, "signature": report["signature"], "status": "started"}
+    with _lock:
+        _state.task = task
+        if request_id:
+            _recent_requests[request_id] = response
+            while len(_recent_requests) > _REQUEST_MEMORY:
+                _recent_requests.pop(next(iter(_recent_requests)))
+    return {**response, "duplicate": False, "task": task}
+
+
+async def _execute_scenario(run: "scenario.ScenarioRun", ctx: dict) -> dict:
+    """Run to completion, save, then the post-run agent pipeline. Always leaves the
+    status in DONE or ERROR -- never RUNNING/ANALYZING."""
+    agents.coordinator.set_state("recovery", "monitoring", run.id)
+    try:
+        record = await run.run()
+    except BaseException as e:
+        record = run.record
+        record["error"] = guard._join(record.get("error"), f"{type(e).__name__}: {e}")
+        try:
+            save_record(record)
+        finally:
+            with _lock:
+                _state.status, _state.error = STATUS_ERROR, record["error"]
+        raise
+    finally:
+        agents.coordinator.set_state("recovery", "idle")
+
+    path = None
+    try:
+        path = save_record(record)
+        if run.dry_run:
+            # Nothing was injected: there is no outcome to analyse, learn from or remediate.
+            try:
+                store.upsert_experiment(record, None, path)
+            except store.StoreError:
+                pass
+            with _lock:
+                _state.record_snapshot, _state.status = record, STATUS_DONE
+            bus.publish("pipeline", {"experiment_id": record["id"], "state": record["state"], "agents": {}})
+            return {"experiment_path": path, "record": record, "outputs": {}, "runs": []}
+        with _lock:
+            _state.record_snapshot, _state.status = record, STATUS_ANALYZING
+
+        def after_agent(name: str, agent_run: dict) -> None:
+            if name in ("recovery", "validation"):
+                save_record(record)     # these two write their verdict into the record itself
+        ctx.update(record=record, record_path=path, after_agent=after_agent)
+        result = await agents.coordinator.post_run(ctx)
+        save_record(record)
+        outputs = result["outputs"]
+        failed = [r["agent"] for r in result["runs"] if r["status"] in ("failed", "timeout")]
+        with _lock:
+            _state.record_snapshot = record
+            _state.analysis, _state.learning = outputs.get("insights"), outputs.get("learning")
+            _state.remediation_plan = outputs.get("remediation")
+            _state.agent_runs = [{k: v for k, v in r.items() if k != "output"} for r in result["runs"]]
+            _state.error = f"agent(s) failed: {', '.join(failed)}" if failed else None
+            _state.status = STATUS_DONE
+        bus.publish("pipeline", {"experiment_id": record["id"], "state": record["state"],
+                                 "agents": {r["agent"]: r["status"] for r in result["runs"]}})
+        return {"experiment_path": path, "record": record, "outputs": outputs, "runs": result["runs"]}
+    except BaseException as e:
+        where = f"saved to {path}" if path else "NOT saved"
+        with _lock:
+            _state.status = STATUS_ERROR
+            _state.error = f"experiment {where}; post-run processing failed: {type(e).__name__}: {e}"
+        raise
+
+
+async def shutdown(timeout: float | None = None) -> None:
+    """Called on API shutdown: ask the running experiment to stop and wait for its
+    rollback to finish, so a restart never leaves an untracked fault behind."""
+    with _lock:
+        task, ev = _state.task, _state.stop_event
+        running = _state.status in (STATUS_RUNNING, STATUS_ANALYZING)
+    if not running or task is None or task.done():
+        return
+    if ev is not None:
+        ev.set()
+    print("[orchestrator] shutdown: waiting for the running experiment to roll back...", flush=True)
+    limit = timeout or config.ROLLBACK_STEP_TIMEOUT_S * config.MAX_ACTIVE_FAULTS + 60
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=limit)
+    except (asyncio.TimeoutError, asyncio.CancelledError, Exception) as e:  # noqa: BLE001
+        print(f"[orchestrator] shutdown did not complete cleanly ({type(e).__name__}); the recovery "
+              f"journal in {config.JOURNAL_DIR} will be replayed on next start.", flush=True)
+
+
+async def resolve_lockout(actor: str, force: bool = False, note: str = "") -> dict:
+    """Re-run the verifying rollback for everything in the recovery journal. The lockout
+    clears only when every item is observed clean -- or when an operator forces it with a
+    note after fixing things by hand (audited)."""
+    if is_running():
+        raise OrchestratorConflict("an experiment is running; stop it before resolving recovery")
+    result = await scenario.recover_orphans()
+    if result["lockout"] is not None and force:
+        if not note.strip():
+            raise OrchestratorError("a note describing the manual recovery is required to force-clear the lockout")
+        for j in scenario.list_journals():
+            try:
+                os.remove(os.path.join(config.JOURNAL_DIR, f"{j.get('id')}.json"))
+            except OSError:
+                pass
+        scenario.clear_lockout()
+        result = {**result, "lockout": None, "forced": True}
+    try:
+        store.audit(actor, "lockout_resolve", {"forced": bool(result.get("forced")), "note": note,
+                                               "recovered": len(result["recovered"]),
+                                               "failed": len(result["failed"])})
+    except store.StoreError:
+        pass
+    cleared = result["lockout"] is None
+    bus.publish("alert", {"level": "info" if cleared else "critical", "kind": "lockout",
+                          "message": "recovery lockout cleared" if cleared else "recovery is still required"})
+    return result

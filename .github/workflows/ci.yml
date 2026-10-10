@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Byte-compile (syntax check)
+        run: python -m compileall -q -x "(\.venv|frontend|node_modules)" .
+      # Docker, Ditto and the AI provider are mocked. tests/integration needs a real
+      # Docker daemon and is opt-in (DITTO_CHAOS_REAL_DOCKER=1); it is skipped here.
+      - name: Tests
+        run: python -m pytest -q
+
+  backend-real-docker:
+    # Fault registry against a real daemon, on a throwaway alpine container only.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: docker pull alpine:3.20 && docker pull nicolaka/netshoot
+      - name: Real-Docker fault tests
+        env:
+          DITTO_CHAOS_REAL_DOCKER: "1"
+        run: python -m pytest tests/integration -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Tests
+        run: npm test
+      - name: Build
+        run: npm run build

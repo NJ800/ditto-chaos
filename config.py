@@ -73,6 +73,44 @@ FRONTEND_ORIGINS = [o.strip() for o in
                     os.getenv("FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
                     if o.strip()]
 
+# Optional shared secret for state-changing API routes. When set, every POST must send
+# it as the `X-API-Token` header. When empty, the API relies on being bound to
+# loopback only -- `main.py serve` refuses a non-loopback API_HOST without a token.
+API_TOKEN = os.getenv("API_TOKEN", "")
+
+
+def _csv(name: str, default: str) -> list[str]:
+    return [v.strip() for v in os.getenv(name, default).split(",") if v.strip()]
+
+
+# ---- Scenario (multi-fault) limits: hard ceilings enforced by scenario.validate() ----
+MAX_ACTIVE_FAULTS = int(os.getenv("MAX_ACTIVE_FAULTS", "3"))
+MAX_AFFECTED_SERVICES = int(os.getenv("MAX_AFFECTED_SERVICES", "2"))
+MAX_SCENARIO_DURATION_S = float(os.getenv("MAX_SCENARIO_DURATION_S", "300"))
+# Sum of each action's 0..1 intensity (a kill is 1.0, a 500ms delay is 0.1, ...).
+MAX_CUMULATIVE_INTENSITY = float(os.getenv("MAX_CUMULATIVE_INTENSITY", "1.6"))
+ROLLBACK_STEP_TIMEOUT_S = float(os.getenv("ROLLBACK_STEP_TIMEOUT_S", "90"))
+
+# ---- Autonomy ----
+# observe | recommend | manual | autonomous_sandbox. Anything else falls back to "recommend".
+AUTONOMY_MODE = os.getenv("AUTONOMY_MODE", "recommend").strip().lower()
+# The autonomous loop can only ever start when this is true IN CONFIGURATION -- it cannot
+# be switched on through the API or the dashboard.
+AUTONOMY_SANDBOX_ENABLED = os.getenv("AUTONOMY_SANDBOX_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+AUTONOMOUS_FAULTS = _csv("AUTONOMOUS_FAULTS", "kill,delay")
+AUTONOMOUS_TARGETS = _csv("AUTONOMOUS_TARGETS", "gateway,things,things-search,policies,connectivity")
+AUTONOMOUS_MAX_EXPERIMENTS = int(os.getenv("AUTONOMOUS_MAX_EXPERIMENTS", "3"))
+AUTONOMOUS_COOLDOWN_S = float(os.getenv("AUTONOMOUS_COOLDOWN_S", "60"))
+AUTONOMOUS_MAX_ACTIONS = int(os.getenv("AUTONOMOUS_MAX_ACTIONS", "2"))
+AUTONOMOUS_MAX_DURATION_S = float(os.getenv("AUTONOMOUS_MAX_DURATION_S", "90"))
+
+# ---- Durable knowledge store / recovery journal ----
+KNOWLEDGE_DB = os.getenv("KNOWLEDGE_DB", os.path.join(STATE_DIR, "knowledge.db"))
+JOURNAL_DIR = os.getenv("JOURNAL_DIR", os.path.join(STATE_DIR, "journal"))
+LOCKOUT_FILE = os.getenv("LOCKOUT_FILE", os.path.join(STATE_DIR, "recovery_required.json"))
+
+SOFTWARE_VERSION = "2.0.0"
+
 if NUM_CARS < 1 or NUM_CARS > 200:
     raise ValueError("NUM_CARS must be between 1 and 200")
 

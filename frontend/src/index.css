@@ -2,22 +2,45 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
 }
 
 body {
-  font-family: "Inter", system-ui, sans-serif;
+  @apply bg-bg text-ink font-sans text-sm antialiased;
+}
+
+/* Every interactive element gets a visible keyboard focus ring. */
+:focus-visible {
+  outline: 2px solid #6b9bd8;
+  outline-offset: 1px;
+}
+
+@layer components {
+  .num {
+    @apply font-mono tabular-nums;
+  }
+  .th {
+    @apply border-b border-line px-3 py-2 text-left text-xxs font-medium uppercase tracking-wider text-faint;
+  }
+  .td {
+    @apply border-b border-line/60 px-3 py-2 align-top;
+  }
+  .field {
+    @apply h-8 rounded border border-line bg-bg px-2 text-sm text-ink placeholder:text-faint disabled:opacity-50;
+  }
+  .label {
+    @apply mb-1 block text-xxs font-medium uppercase tracking-wider text-faint;
+  }
 }
 
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
-::-webkit-scrollbar-track {
-  background: #0b1220;
-}
 ::-webkit-scrollbar-thumb {
-  background: #223049;
-  border-radius: 6px;
+  background: #2a2e33;
+  border-radius: 5px;
 }

@@ -13,3 +13,8 @@ experiments/
 # local clone of upstream Eclipse Ditto (see README "Start Ditto") -- not this
 # project's own code, has its own .git, and is large; clone it yourself locally
 ditto/
+
+# local artefacts
+*.db-wal
+*.db-shm
+frontend/e2e-shots/

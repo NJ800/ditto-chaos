@@ -2,6 +2,7 @@ httpx>=0.27,<1.0
 
 # backend API for the dashboard (api.py)
 fastapi>=0.115,<1.0
+pydantic>=2.6,<3.0        # imported directly by scenario.py / api.py
 uvicorn[standard]>=0.30,<1.0
 
 # dev / test only

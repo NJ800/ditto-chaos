@@ -103,3 +103,17 @@ Everything below goes through `orchestrator.py` — the exact same `guard.py` li
 7. **Verify recovery**: once the lifecycle reaches `COMPLETED` (or `RECOVERY_TIMEOUT`/`FAILED`), the Overview page's "Last recovery result" panel and the orchestrator status badge reflect the real outcome.
 8. **Inspect findings**: AI Insights & Remediation (or Experiment History → click the experiment) shows the real evidence-grounded analysis and remediation plan, generated automatically right after the run. Approve/reject items there — this records an audit-trail decision only; nothing is auto-applied (see `remediation_planner.py`'s docstring for why).
 9. **Handle failed recovery**: if the state is `RECOVERY_TIMEOUT` or `FAILED`, treat it exactly as step 8 above describes for the CLI path — check `rollback_error` in the experiment detail's raw timeline/record, and follow the README's "Manual recovery" instructions if a fault may still be active. The dashboard will not let you start a second experiment while one is still `running`/`analyzing` (`already running` error), so there is never ambiguity about which experiment "Stop" refers to.
+
+
+## 13. Version 2: scenarios, modes, recovery
+
+Reference: [docs/V2.md](docs/V2.md).
+
+1. **List what can be injected:** `python main.py faults`.
+2. **Preview a multi-fault scenario without injecting:** write the scenario JSON (example in docs/V2.md) and run `python main.py scenario my.json`; add `--preflight` to also check the real containers (read-only).
+3. **Run it:** dashboard -> Experiment control -> build the scenario -> **Preview plan** -> tick the authorization box -> **Run this scenario**. In `recommend` mode only the agent's proposal can be run; switch to `manual` for a custom scenario.
+4. **Stop it:** **Emergency stop** (or `POST /api/stop`). Every active fault is rolled back and verified.
+5. **If the red "Recovery required" banner appears:** do not start anything else. Follow docs/V2.md "Resolving RECOVERY_REQUIRED". `python main.py recover` does the same from a terminal, including when the API is down.
+6. **After an API crash or forced kill:** just start it again; startup replays `state/journal/`. Check `GET /api/readyz` -> `startup_recovery`.
+7. **Autonomous sandbox:** set `AUTONOMY_SANDBOX_ENABLED=true` in `.env`, restart the API, select the mode, **Run sandbox checks**, then **Start autonomous loop**. It stops by itself at its budget, on any failed check, and on any run that does not end cleanly recovered. This loop has only been tested against a mocked Docker.
+8. **Verify the fault mechanisms on your machine:** the real-Docker suite in the README's "Running tests".

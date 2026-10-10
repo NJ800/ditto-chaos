@@ -32,6 +32,14 @@ def ai_enabled() -> bool:
     return bool(config.AI_ENABLED and config.GEMINI_API_KEY)
 
 
+def provider_name() -> str:
+    return "gemini"
+
+
+def model_info() -> dict:
+    return {"provider": provider_name(), "model": config.GEMINI_MODEL, "enabled": ai_enabled()}
+
+
 def generate_json(prompt: str, timeout: float | None = None) -> dict:
     """Ask Gemini for a JSON object. Returns the parsed dict, or raises
     AIUnavailable -- never returns a partially-parsed or guessed result.
