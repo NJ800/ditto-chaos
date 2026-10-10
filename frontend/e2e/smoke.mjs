@@ -104,6 +104,19 @@ try {
   }
   await shot("control");
 
+  // Ranked candidates: ranking and selecting are read-only and must not start a run.
+  await page.getByRole("button", { name: /^Rank (candidates|again)$/ }).click();
+  await page.getByRole("heading", { level: 3, name: "Ranked candidates" }).waitFor({ timeout: 20000 });
+  const pick = page.getByRole("button", { name: /^Select candidate \d+:/ }).first();
+  if (await pick.count()) {
+    await pick.click();
+    await page.getByText("selected by operator").first().waitFor({ timeout: 15000 });
+    if (await page.getByRole("heading", { name: "Running experiment", exact: true }).count()) note("candidates", "selecting a candidate started a run");
+    if (!(await page.getByRole("button", { name: "Run proposed scenario" }).isDisabled())) note("candidates", "run is enabled without authorization");
+    console.log("ok   ranked candidates + select (nothing started)");
+  }
+  await shot("control-candidates");
+
   await open("/agents", "Agents");
   await shot("agents");
 
@@ -121,6 +134,19 @@ try {
   await open("/insights", "Insights and learning");
   await page.getByRole("heading", { level: 2, name: "Evidence base" }).waitFor({ timeout: 20000 });
   await shot("insights");
+
+  // Re-run after a fix: open the panel and read the plan. It is never started here.
+  const rerun = page.getByRole("button", { name: "Re-run experiment" }).first();
+  if (await rerun.count()) {
+    await rerun.click();
+    const panel = page.getByRole("group", { name: "Re-run experiment" });
+    await panel.or(page.getByText(/A revised plan is required/)).first().waitFor({ timeout: 15000 });
+    if (await panel.count()) {
+      if (!(await panel.getByRole("button", { name: "Start follow-up run" }).isDisabled())) note("rerun", "start is enabled without both confirmations");
+    }
+    await shot("insights-rerun");
+    console.log("ok   re-run panel (plan shown, not started)");
+  }
 
   await open("/dependencies", "Dependencies");
   await shot("dependencies");

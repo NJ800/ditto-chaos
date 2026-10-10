@@ -2,7 +2,9 @@
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import type { ActionState, AgentRun, Analysis, LearningRecord, Recommendation, TimelineEvent, ValidationReport } from "../api/types";
+import { useState } from "react";
 import { useAction } from "../hooks";
+import { RerunPanel } from "./followup";
 import { DASH, clock, duration, humanize, num } from "../lib/format";
 import { Badge, Button, Empty, ErrorNote, KV, List, Mono, Note, StateBadge } from "./ui";
 
@@ -191,6 +193,8 @@ const NEXT: Record<string, { status: string; label: string }[]> = {
 
 function RecRow({ rec, onChanged }: { rec: Recommendation; onChanged: () => void }) {
   const act = useAction((status: string) => api.setRecommendation(rec.experiment_id, rec.index, status), onChanged);
+  const [rerun, setRerun] = useState(false);
+  const canRerun = rec.status !== "rejected" && rec.status !== "verified";
   const it = rec.item;
   return (
     <div className="rounded border border-line bg-raised p-3 text-xs">
@@ -207,6 +211,11 @@ function RecRow({ rec, onChanged }: { rec: Recommendation; onChanged: () => void
               {n.label}
             </Button>
           ))}
+          {canRerun && (
+            <Button variant="primary" aria-expanded={rerun} onClick={() => setRerun((r) => !r)}>
+              {rerun ? "Close re-run" : "Re-run experiment"}
+            </Button>
+          )}
         </div>
       </div>
       <div className="mt-2">
@@ -226,6 +235,11 @@ function RecRow({ rec, onChanged }: { rec: Recommendation; onChanged: () => void
         />
       </div>
       {act.error && <div className="mt-2"><ErrorNote message={act.error} /></div>}
+      {rerun && canRerun && (
+        <div className="mt-3">
+          <RerunPanel rec={rec} onStarted={onChanged} />
+        </div>
+      )}
     </div>
   );
 }
@@ -234,7 +248,7 @@ export function Recommendations({ recs, onChanged }: { recs: Recommendation[]; o
   if (!recs.length) return <Empty>No recommendations yet. They are generated after an experiment has been analysed.</Empty>;
   return (
     <div className="space-y-2">
-      <p className="text-xxs text-faint">Nothing here is applied by this tool. "Implemented" records that you made the change yourself; the next run of the same scenario then marks it verified or not effective.</p>
+      <p className="text-xxs text-faint">Nothing here is applied by this tool. After you have made a change yourself, "Re-run experiment" repeats the original scenario as a linked follow-up and compares the two runs; the recommendation is then marked verified or not effective.</p>
       {[...recs].sort((a, b) => (a.item.priority ?? 99) - (b.item.priority ?? 99)).map((r) => (
         <RecRow key={`${r.experiment_id}-${r.index}`} rec={r} onChanged={onChanged} />
       ))}

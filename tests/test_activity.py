@@ -542,3 +542,21 @@ def test_events_api_never_returns_configured_secrets(client, monkeypatch):
     wait_done(client)
     body = client.get(f"/api/experiments/{exp}/events", headers=hdr).text
     assert "tok-9f8e7d6c5b4a" not in body and "Authorized by alice" in body
+
+
+async def test_dry_run_with_an_expired_baseline_still_previews_and_says_a_real_run_would_be_refused(
+        realcmd, monkeypatch, tmp_path):
+    sandbox = realcmd       # commands go through the real run_cmd, so previews are recorded
+    stale = tmp_path / "baseline.json"
+    stale.write_text(json.dumps({"recorded_at": time.time() - 3 * 3600, "direct_ms": {"p95": 20},
+                                 "search_ms": {"p95": 20}, "direct_error_rate": 0.0, "search_error_rate": 0.0}))
+    monkeypatch.setattr(config, "BASELINE_FILE", str(stale))
+    r, rec = await run(scn(("kill", "things")), authorization=None, dry_run=True)
+    assert rec["state"] == guard.STATE_COMPLETED and rec["baseline_source"] == "fresh"
+    assert "stale" in rec["real_run_blocker"]
+    warn = of(rec, "warning")
+    assert len(warn) == 1 and warn[0]["message"].startswith("A REAL run would be refused at this point")
+    assert of(rec, "command", "INJECTING") and sandbox.calls == []
+    # the real run is still refused for exactly that reason
+    r, rec = await run(scn(("kill", "things")))
+    assert rec["state"] == guard.STATE_ABORTED and "stale" in rec["error"] and sandbox.mutating_calls() == []

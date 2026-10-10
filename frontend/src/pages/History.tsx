@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import type { ExperimentSummary } from "../api/types";
 import { ActivityLog } from "../components/ActivityLog";
 import { ActionsTable, AgentRuns, Findings, LearningCard, Recommendations, Timeline } from "../components/experiment";
+import { Followups } from "../components/followup";
 import { MetricChart } from "../components/MetricChart";
 import { Badge, Button, Empty, ErrorNote, KV, List, Note, PageHeader, Panel, Skeleton, StateBadge } from "../components/ui";
 import { useAsync } from "../hooks";
@@ -119,6 +120,7 @@ export function ExperimentDetailPage() {
   if (d.error) return <ErrorNote message={d.error} onRetry={d.reload} />;
   if (!d.data) return <Skeleton rows={6} />;
   const { record: rec, analysis, learning, recommendations, agent_runs, timeline } = d.data;
+  const followups = d.data.followups ?? [];
   const v = rec.validation;
   const base = (rec.baseline ?? {}) as { direct_ms?: { p95?: number | null } };
 
@@ -185,6 +187,12 @@ export function ExperimentDetailPage() {
           baseline={base.direct_ms?.p95 ? { value: base.direct_ms.p95, label: "baseline p95" } : null}
         />
       </Panel>
+
+      {followups.length > 0 && (
+        <Panel title="Before and after the remediation" meta="original run versus follow-up run, per metric">
+          <Followups items={followups} experimentId={rec.id} />
+        </Panel>
+      )}
 
       <Panel title="What happened, step by step" meta="recorded by the experiment controller; select a lifecycle step to filter">
         <ActivityLog key={rec.id} experimentId={rec.id} currentState={rec.state} />

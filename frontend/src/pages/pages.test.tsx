@@ -248,6 +248,34 @@ describe("Experiment control", () => {
   });
 });
 
+describe("Ranked candidates on Experiment control", () => {
+  it("ranks, selects into the proposal, and still requires authorization to run", async () => {
+    const user = userEvent.setup();
+    mocked.candidates.mockResolvedValue({
+      generated_at_utc: "",
+      evidence_runs: 3,
+      store_degraded: null,
+      candidates: [{ rank: 1, signature: "delay@things", targets: ["things"], faults: ["delay"], risk: "medium", hypothesis: "Untested.", reason: "0 stored run(s)", expected_impact: "Unknown.", score: 0.75, components: { novelty: 1 }, runs: 0, blocked: false, selectable: true, not_selectable_reason: null, evidence: { basis: "none", basis_runs: 0, agreement: null, confidence: "none", experiments: [] } }],
+    });
+    const proposal = { proposal_id: "p9", method: "operator_selected", fallback_note: "selected by an operator", objective: "o", hypothesis: "h", target_reason: "r", expected_impact: "e", expected_symptoms: [], metrics_to_observe: [], safety_risks: [], stop_conditions: ["operator emergency stop"], preflight_requirements: [], learning_value: "l", dependencies: [], scenario: { actions: [], max_duration_s: 60 }, validation: REPORT(true), prediction: {}, confidence: { level: "none", basis: "none", basis_runs: 0, agreement: null }, related_experiments: [], ranking: { rank: 1, score: 0.75, components: {}, rationale: [] }, alternatives: [], store_degraded: null, generated_at_utc: "2026-10-10T18:00:00+00:00" };
+    mocked.selectCandidate.mockResolvedValue(proposal);
+    show("/control", liveState());
+    await user.click(await screen.findByRole("button", { name: "Rank candidates" }));
+    expect(await screen.findByText("Ranked candidates")).toBeInTheDocument();
+    expect(mocked.runScenario).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Select candidate 1: delay@things" }));
+    expect(await screen.findByText("selected by operator")).toBeInTheDocument();
+    expect(mocked.runScenario).not.toHaveBeenCalled(); // selecting ran nothing
+    const run = screen.getByRole("button", { name: "Run proposed scenario" });
+    expect(run).toBeDisabled(); // not authorized yet
+    const boxes = screen.getAllByRole("checkbox", { name: /I authorize REAL fault injection/ });
+    await user.click(boxes[0]);
+    mocked.runScenario.mockResolvedValue({ status: "started", experiment_id: "exp-3", duplicate: false });
+    await user.click(run);
+    expect(mocked.runScenario.mock.calls[0][0]).toMatchObject({ authorize: true, proposal_id: "p9" });
+  });
+});
+
 describe("History", () => {
   it("filters by text, outcome and evidence", () => {
     const rows = [summary(), summary({ id: "exp-2", signature: "delay@mongodb", outcome_class: "tolerated", symptoms: [] }), summary({ id: "exp-3", simulated: true, evidence: false, outcome_class: "no_evidence", symptoms: [] })];
@@ -289,6 +317,7 @@ describe("History", () => {
       recommendations: [REC],
       agent_runs: [],
       timeline: [{ id: 1, ts: 1791600000, type: "authorized", data: { kind: "operator", actor: "alice" } }],
+      followups: [],
     };
     mocked.experiment.mockResolvedValue(detail);
     show("/history/exp-1", liveState());

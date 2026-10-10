@@ -73,6 +73,8 @@ class _RunState:
     agent_runs: list | None = None
     task: "asyncio.Task | None" = None
     stop_requested: bool = False
+    candidates: dict | None = None
+    candidates_ctx: dict | None = None
 
 
 _state = _RunState()
@@ -526,7 +528,8 @@ def _on_update(record: dict) -> None:
 
 def start_scenario(scn: "scenario.Scenario", authorization: "scenario.Authorization | None", *,
                    policy: dict | None = None, proposal: dict | None = None, mode: str | None = None,
-                   source: str = "operator", request_id: str | None = None, dry_run: bool = False) -> dict:
+                   source: str = "operator", request_id: str | None = None, dry_run: bool = False,
+                   fresh_baseline: bool = False, extra_meta: dict | None = None) -> dict:
     """Validate and claim SYNCHRONOUSLY, then run in the background. Raises
     OrchestratorConflict / scenario.ScenarioRejected immediately for anything refused.
     Must be called on the event loop thread. Returns {experiment_id, task, duplicate}.
@@ -560,9 +563,10 @@ def start_scenario(scn: "scenario.Scenario", authorization: "scenario.Authorizat
         keep = ("proposal_id", "method", "objective", "hypothesis", "ranking", "confidence")
         run = scenario.ScenarioRun(
             scn, authorization, dep_map=ctx["dep_map"], policy=policy, stop_event=stop_event,
-            on_event=_on_event, on_update=_on_update, dry_run=dry_run,
+            on_event=_on_event, on_update=_on_update, dry_run=dry_run, fresh_baseline=fresh_baseline,
             meta={"mode": mode, "source": "dry_run" if dry_run else source, "prediction": prediction,
-                  "proposal": {k: proposal.get(k) for k in keep} if proposal else None})
+                  "proposal": {k: proposal.get(k) for k in keep} if proposal else None,
+                  **(extra_meta or {})})
         report = run.prepare()
     except BaseException:
         with _lock:
@@ -645,8 +649,10 @@ async def _execute_scenario(run: "scenario.ScenarioRun", ctx: dict) -> dict:
                 save_record(record)     # these two write their verdict into the record itself
         ctx.update(record=record, record_path=path, after_agent=after_agent)
         result = await agents.coordinator.post_run(ctx)
-        save_record(record)
         outputs = result["outputs"]
+        if record.get("followup_of"):
+            await asyncio.to_thread(_complete_followup, record, outputs)
+        save_record(record)
         failed = [r["agent"] for r in result["runs"] if r["status"] in ("failed", "timeout")]
         with _lock:
             _state.record_snapshot = record
@@ -712,3 +718,191 @@ async def resolve_lockout(actor: str, force: bool = False, note: str = "") -> di
     bus.publish("alert", {"level": "info" if cleared else "critical", "kind": "lockout",
                           "message": "recovery lockout cleared" if cleared else "recovery is still required"})
     return result
+
+
+# ================================================================ ranked candidates
+import faults  # noqa: E402
+import scenario_planner  # noqa: E402
+from planner_agent import PlannerError  # noqa: E402
+
+
+def rank_candidates_view(policy: dict | None = None) -> dict:
+    """The ranked candidate list for the dashboard. Read-only: no Docker, no lock, nothing
+    is authorized. The ranking context is kept so a later select_candidate() refers to
+    exactly the list the operator saw."""
+    ctx = gather_context(policy)
+    ctx["outputs"]["risk"] = agents.RiskAgent().run(ctx)
+    ranked = learning.rank_candidates(ctx["dep_map"], ctx["history"], (policy or {}).get("allowed_faults"),
+                                      (policy or {}).get("allowed_targets"), policy, ctx["pending_validation"])
+    ctx["ranked"] = ranked
+    view = {"generated_at_utc": guard.utc_now_iso(), "policy": policy,
+            "store_degraded": ctx["store_degraded"], "weights": learning.WEIGHTS,
+            "evidence_runs": sum(1 for c in ctx["history"] if c.get("evidence")),
+            "candidates": scenario_planner.propose_candidates(ranked, ctx["dep_map"], ctx["history"],
+                                                              ctx["outputs"]["risk"], policy)}
+    with _lock:
+        _state.candidates, _state.candidates_ctx = view, ctx
+    return view
+
+
+def select_candidate(signature: str, mode: str | None = None) -> dict:
+    """Turn a ranked candidate into the current proposal. This is NOT an authorization and
+    starts nothing: the proposal still has to be run through start_scenario() with an
+    Authorization, exactly like a planner-generated one."""
+    with _lock:
+        ctx = _state.candidates_ctx
+    if ctx is None:
+        raise OrchestratorConflict("no ranked candidate list exists yet -- rank candidates first")
+    try:
+        body = scenario_planner.proposal_for(signature, ctx["ranked"], ctx["dep_map"], ctx["history"],
+                                             ctx["outputs"].get("risk"), ctx.get("policy"))
+    except PlannerError as e:
+        raise OrchestratorError(str(e)) from e
+    proposal_id = uuid.uuid4().hex[:12]
+    proposal = {"proposal_id": proposal_id, "mode": mode, "store_degraded": ctx["store_degraded"], **body}
+    with _lock:
+        _state.scenario_proposal, _state.plan_ctx = proposal, ctx
+        if _state.status not in (STATUS_RUNNING, STATUS_ANALYZING):
+            _state.status = STATUS_PLANNED
+    _timeline("proposed", {"signature": signature, "method": "operator_selected",
+                           "hypothesis": proposal["hypothesis"]}, proposal_id=proposal_id)
+    bus.publish("proposal", {"proposal_id": proposal_id, "signature": signature, "method": "operator_selected"})
+    return proposal
+
+
+# ================================================================ re-run after a fix
+RERUN_PRE_S = 30.0      # a follow-up re-measures its own healthy baseline over this long
+
+
+def _load_record(experiment_id: str) -> dict:
+    path = os.path.join(config.EXPERIMENTS_DIR, f"{experiment_id}.json")
+    if not os.path.isfile(path):
+        raise OrchestratorError(f"no saved experiment '{experiment_id}'")
+    try:
+        with open(path, encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError) as e:
+        raise OrchestratorError(f"experiment '{experiment_id}' cannot be read: {e}") from e
+    if not isinstance(rec, dict):
+        raise OrchestratorError(f"experiment '{experiment_id}' is not a valid record")
+    return rec
+
+
+def _original_scenario(record: dict) -> tuple["scenario.Scenario | None", list[str]]:
+    """The scenario to repeat, rebuilt from a schema-2.0 or schema-1.x record."""
+    reasons: list[str] = []
+    if record.get("dry_run") or record.get("simulated"):
+        reasons.append("the original was a dry run: nothing was injected, so there is no result to compare with")
+    elif not record.get("injected"):
+        reasons.append("no fault was injected in the original run, so there is no result to compare with")
+    try:
+        if isinstance(record.get("scenario"), dict):
+            base = scenario.Scenario(**record["scenario"])
+        elif record.get("fault") and record.get("target") and record.get("fault") != "multi":
+            spec = faults.get_spec(record["fault"])
+            known = {p.name for p in spec.params} if spec else set()
+            params = {k: v for k, v in (record.get("params") or {}).items()
+                      if k in known and isinstance(v, (int, float)) and not isinstance(v, bool)}
+            base = scenario.Scenario(name=f"{record['fault']}@{record['target']}", max_duration_s=60,
+                                     actions=[{"fault": record["fault"], "target": record["target"],
+                                               "params": params}])
+        else:
+            return None, reasons + ["the original record does not contain a fault scenario"]
+    except Exception as e:  # noqa: BLE001 -- pydantic: the stored scenario no longer fits the schema
+        return None, reasons + [f"the original scenario is no longer valid: {str(e).splitlines()[0][:200]}"]
+    scn = base.model_copy(update={"pre_s": RERUN_PRE_S,
+                                  "name": f"re-run of {record.get('id')}"[:120],
+                                  "hypothesis": (f"After the remediation, repeating '{learning.signature_of(record)}' "
+                                                 f"should no longer show the original finding.")})
+    return scn, reasons
+
+
+def plan_rerun(experiment_id: str, rec_index: int) -> dict:
+    """Read-only. Can the original scenario be repeated safely as it was? If not, says why
+    and that a revised plan is required -- it never substitutes a different scenario."""
+    record = _load_record(experiment_id)
+    rec = store.get_recommendation(experiment_id, rec_index)
+    if rec is None:
+        raise OrchestratorError(f"no recommendation {rec_index} for experiment '{experiment_id}'")
+    scn, reasons = _original_scenario(record)
+    report = None
+    if scn is not None:
+        report = scenario.validate(scn, _load_or_build_dependency_map())
+        reasons += [e["message"] for e in report["errors"]]
+    if rec["status"] == "rejected":
+        reasons.append("this recommendation was rejected; reopen it before testing it")
+    ok = scn is not None and not reasons
+    return {"ok": ok, "requires_revised_plan": not ok, "reasons": reasons,
+            "scenario": scn.model_dump() if scn is not None else None, "validation": report,
+            "original": {"id": record.get("id"), "signature": learning.signature_of(record),
+                         "state": record.get("state"), "outcome_class": learning.observe(record)["outcome_class"],
+                         "started_at_utc": record.get("started_at_utc")},
+            "recommendation": rec,
+            "baseline_note": (f"The follow-up ignores baseline.json and measures a fresh baseline over "
+                              f"{RERUN_PRE_S:g}s immediately before injecting; it is refused if Ditto is not "
+                              f"healthy during that window."),
+            "caveat": learning.CORRELATION_CAVEAT}
+
+
+def start_rerun(experiment_id: str, rec_index: int, authorization: "scenario.Authorization", *,
+                confirmed_applied: bool, actor: str, note: str = "", mode: str | None = None,
+                request_id: str | None = None) -> dict:
+    """Start a follow-up experiment linked to the original and to the remediation. Goes
+    through start_scenario(): same authorization, locks, kill switch and rollback as any run."""
+    if not confirmed_applied:
+        raise OrchestratorError("confirm that the change was actually applied before re-running: an accepted "
+                                "recommendation is not evidence that anything changed")
+    plan = plan_rerun(experiment_id, rec_index)
+    if not plan["ok"]:
+        raise scenario.ScenarioRejected(
+            "the original scenario cannot be re-run as it was; a revised plan is required",
+            errors=[{"code": "rerun_not_possible", "message": r, "action": None} for r in plan["reasons"]],
+            code="policy_violation")
+    rec = plan["recommendation"]
+    link = {"experiment_id": experiment_id, "recommendation_index": rec_index,
+            "recommendation_id": rec["item"].get("id"), "recommendation_title": rec["title"],
+            "finding_title": rec["item"].get("finding_title"),
+            "confirmed_applied_by": actor, "confirmation_note": note,
+            "confirmed_at_utc": guard.utc_now_iso()}
+    started = start_scenario(scenario.Scenario(**plan["scenario"]), authorization, mode=mode, source="rerun",
+                             request_id=request_id, fresh_baseline=True, extra_meta={"followup_of": link})
+    if not started["duplicate"]:
+        try:
+            store.set_recommendation_status(experiment_id, rec_index, "implemented", None,
+                                            f"{actor} confirmed the change was applied"
+                                            + (f": {note}" if note else ""))
+            store.create_followup(started["experiment_id"], experiment_id, rec_index, link["recommendation_id"],
+                                  actor, note)
+            store.audit(actor, "rerun_started", {"original": experiment_id, "followup": started["experiment_id"],
+                                                 "recommendation_index": rec_index, "note": note})
+        except store.StoreError as e:
+            print(f"[orchestrator] follow-up link not persisted: {e}", flush=True)
+        _timeline("rerun", {"original": experiment_id, "recommendation": rec["title"], "confirmed_by": actor},
+                  started["experiment_id"])
+    return {**started, "original_id": experiment_id, "recommendation_index": rec_index}
+
+
+def _complete_followup(record: dict, outputs: dict) -> None:
+    """Compare the follow-up with its original and persist the verification result."""
+    link = record.get("followup_of") or {}
+    try:
+        original = _load_record(link["experiment_id"])
+        comparison = learning.compare_runs(original, record)
+        analysis = outputs.get("insights")
+        titles = [f.get("title") for f in analysis["findings"]] if analysis else None
+        rec = store.get_recommendation(link["experiment_id"], link["recommendation_index"])
+        verification = remediation_planner.verification_result(
+            comparison, link.get("finding_title"), titles, (record.get("validation") or {}).get("verdict"),
+            ((rec or {}).get("item") or {}).get("expected_benefit"))
+        result = {**comparison, "verification": verification, "link": link,
+                  "recommendation_status": (rec or {}).get("status")}
+        record["followup_comparison"] = result
+        store.complete_followup(record["id"], verification["demonstrated"], result)
+    except Exception as e:  # noqa: BLE001 -- the run itself is already saved and rolled back
+        record["followup_comparison"] = {"error": f"comparison could not be produced: {type(e).__name__}: {e}"[:400],
+                                         "link": link}
+        print(f"[orchestrator] follow-up comparison failed: {e}", flush=True)
+        try:
+            store.complete_followup(record["id"], "inconclusive", record["followup_comparison"])
+        except store.StoreError:
+            pass

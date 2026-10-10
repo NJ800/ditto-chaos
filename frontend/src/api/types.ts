@@ -217,6 +217,7 @@ export interface Proposal {
   prediction: Prediction;
   confidence: { level: string; basis: string; basis_runs: number; agreement: string | null };
   related_experiments: string[];
+  risk?: string;
   ranking: { rank: number; score: number; components: Record<string, number>; rationale: string[] };
   alternatives: { signature: string; score: number | null; rank: number; blocked: boolean; rationale: string[] }[];
   store_degraded: string | null;
@@ -294,6 +295,8 @@ export interface ExperimentRecord {
   /** Activity log. Absent on records saved before schema 1.1 / 2.0-with-events. */
   events?: ExperimentEvent[];
   validation?: ValidationVerdict | null;
+  followup_of?: FollowupLink | null;
+  followup_comparison?: FollowupComparison | null;
   recovery_report?: RecoveryReport | null;
   recovery_instructions?: RecoveryInstruction[];
 }
@@ -499,6 +502,7 @@ export interface ExperimentDetail {
   recommendations: Recommendation[];
   agent_runs: AgentRun[];
   timeline: TimelineEvent[];
+  followups: Followup[];
 }
 
 export interface OrchestratorStatus {
@@ -567,6 +571,8 @@ export interface Snapshot {
   services: ServicesView;
   rows: MetricRow[];
   baseline: Baseline | null;
+  /** A real run is refused when baseline.json is older than this. */
+  baseline_max_age_s?: number;
   thresholds: Thresholds;
   orchestrator: OrchestratorStatus;
   controller: ControllerStatus;
@@ -690,4 +696,115 @@ export interface ExperimentEventsResponse {
   dry_run: boolean;
   last_seq: number;
   events: ExperimentEvent[];
+}
+
+// ---- ranked candidates (GET /api/plan/candidates)
+export interface Candidate {
+  rank: number;
+  signature: string;
+  targets: string[];
+  faults: string[];
+  risk: "low" | "medium" | "high" | "unknown";
+  hypothesis: string;
+  reason: string;
+  expected_impact: string;
+  score: number | null;
+  components: Record<string, number>;
+  runs: number;
+  blocked: boolean;
+  selectable: boolean;
+  not_selectable_reason: string | null;
+  evidence: { basis: "direct" | "analogy" | "none"; basis_runs: number; agreement: string | null; confidence: string; experiments: string[] };
+  scenario?: Scenario;
+}
+
+export interface CandidatesView {
+  generated_at_utc: string;
+  evidence_runs: number;
+  store_degraded: string | null;
+  candidates: Candidate[];
+}
+
+// ---- re-run after a fix
+export interface RerunPlan {
+  ok: boolean;
+  requires_revised_plan: boolean;
+  reasons: string[];
+  scenario: Scenario | null;
+  validation: ValidationReport | null;
+  original: { id: string; signature: string; state: string | null; outcome_class: string; started_at_utc: string | null };
+  recommendation: Recommendation;
+  baseline_note: string;
+  caveat: string;
+}
+
+export interface FollowupLink {
+  experiment_id: string;
+  recommendation_index: number;
+  recommendation_id: string | null;
+  recommendation_title: string;
+  finding_title: string | null;
+  confirmed_applied_by: string;
+  confirmation_note: string;
+  confirmed_at_utc: string;
+}
+
+export interface ComparedMetric {
+  key: string;
+  label: string;
+  unit: "ms" | "s" | "ratio" | "count";
+  before: number | null;
+  after: number | null;
+  change: number | null;
+  change_pct: number | null;
+  verdict: "improved" | "regressed" | "unchanged" | "not_comparable";
+  reason: string | null;
+}
+
+export interface RunOutcome {
+  id: string;
+  state: string | null;
+  outcome_class: string;
+  aborted: boolean;
+  abort_reason: string | null;
+  recovery_outcome: string | null;
+  fault_ticks: number;
+  baseline_source: string | null;
+  baseline_direct_p95_ms: number | null;
+}
+
+export interface FollowupComparison {
+  error?: string;
+  original_id: string;
+  followup_id: string;
+  signature: string;
+  comparable: boolean;
+  not_comparable_reasons: string[];
+  parameter_differences: string[];
+  metrics: ComparedMetric[];
+  summary: { improved: number; regressed: number; unchanged: number; not_comparable: number };
+  outcomes: { original: RunOutcome; followup: RunOutcome };
+  caveat: string;
+  verification?: {
+    demonstrated: "observed" | "not_observed" | "inconclusive";
+    statement: string;
+    finding_title: string | null;
+    finding_recurred: boolean | null;
+    expected_benefit: string | null;
+    evidence_strength: string;
+  };
+  link?: FollowupLink;
+}
+
+export interface Followup {
+  followup_id: string;
+  original_id: string;
+  rec_index: number;
+  recommendation_id: string | null;
+  created_at_utc: string;
+  confirmed_by: string;
+  confirmation_note: string;
+  status: string;
+  completed_at_utc: string | null;
+  result: FollowupComparison | null;
 }

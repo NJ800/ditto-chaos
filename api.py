@@ -220,6 +220,7 @@ def get_snapshot(window_s: float = 600):
     return {"seq": seq, "boot": boot, "server_time": time.time(),
             **monitor.snapshot(max(10.0, min(float(window_s), 3600.0))),
             "baseline": probe.load_baseline(), "thresholds": asdict(guard.Thresholds.from_env()),
+            "baseline_max_age_s": guard.MAX_BASELINE_AGE_S_DEFAULT,
             "orchestrator": _status_view(), "controller": controller.status(),
             "agents": agents.coordinator.status()}
 
@@ -329,6 +330,26 @@ async def post_scenario_plan(actor: str = Depends(operator)):
     """Run the planning agents (risk -> fault injection). Read-only; proposes, never runs."""
     policy = controller.policy() if controller.mode == "autonomous_sandbox" else None
     return await orch.generate_scenario_plan(policy=policy, mode=controller.mode)
+
+
+class SelectRequest(BaseModel):
+    signature: str = Field(max_length=300)
+
+
+@app.get("/api/plan/candidates", tags=["scenarios"])
+def get_plan_candidates():
+    """Ranked candidate experiments with risk, hypothesis, reason, expected impact and the
+    stored evidence behind each. Read-only; every candidate is validated against the fault
+    registry, the allowlist, parameter bounds and the policy."""
+    policy = controller.policy() if controller.mode == "autonomous_sandbox" else None
+    return orch.rank_candidates_view(policy)
+
+
+@app.post("/api/plan/select", tags=["scenarios"])
+def select_plan_candidate(req: SelectRequest, actor: str = Depends(operator)):
+    """Make one ranked candidate the current proposal. Selecting authorizes nothing and
+    starts nothing; running it still needs POST /api/scenarios/run with authorize: true."""
+    return orch.select_candidate(req.signature, controller.mode)
 
 
 @app.get("/api/plan", tags=["scenarios"])
@@ -598,7 +619,8 @@ def get_experiment(experiment_id: str):
                 lambda: [r for r in store.recommendations() if r["experiment_id"] == experiment_id], []),
             "agent_runs": _optional(lambda: [{k: v for k, v in r.items() if k != "output"}
                                              for r in store.agent_runs(experiment_id)], []),
-            "timeline": _optional(lambda: store.timeline(experiment_id), [])}
+            "timeline": _optional(lambda: store.timeline(experiment_id), []),
+            "followups": _optional(lambda: store.followups(experiment_id), [])}
 
 
 @app.get("/api/experiments/{experiment_id}/report", tags=["history"])
@@ -652,6 +674,48 @@ def get_experiment_events(experiment_id: str,
             "dry_run": bool(record.get("dry_run") or record.get("simulated")),
             "last_seq": events[-1]["seq"] if events else 0,
             "events": activity.events_after(record, after_seq)}
+
+
+class RerunRequest(BaseModel):
+    recommendation_index: int = Field(ge=0)
+    authorize: bool = False
+    confirm_applied: bool = False
+    note: str = Field(default="", max_length=500)
+    request_id: str | None = Field(default=None, max_length=80)
+
+
+@app.get("/api/experiments/{experiment_id}/rerun-plan", tags=["insights"])
+def get_rerun_plan(experiment_id: str, recommendation_index: int = Query(ge=0)):
+    """Read-only: whether the original scenario can be repeated as it was, and if not, why."""
+    _load_experiment_or_404(experiment_id)
+    return orch.plan_rerun(experiment_id, recommendation_index)
+
+
+@app.post("/api/experiments/{experiment_id}/rerun", tags=["insights"])
+async def rerun_experiment(experiment_id: str, req: RerunRequest, actor: str = Depends(operator)):
+    """Re-run an experiment after a remediation was applied by hand. Needs BOTH an explicit
+    authorization and the operator's confirmation that the change was really made. The
+    follow-up is linked to the original and to the recommendation, and compared with it."""
+    _load_experiment_or_404(experiment_id)
+    if not req.authorize:
+        raise HTTPException(400, "authorize must be true -- an operator must explicitly approve this run")
+    if not req.confirm_applied:
+        raise HTTPException(400, "confirm_applied must be true -- confirm that the remediation was actually "
+                                 "applied; an accepted recommendation is not evidence that anything changed")
+    # A re-run repeats a scenario the platform already ran, so it is allowed wherever a
+    # proposed scenario is (not in observe mode).
+    auth = controller.operator_authorization(actor, custom=False)
+    started = orch.start_rerun(experiment_id, req.recommendation_index, auth, confirmed_applied=True,
+                               actor=actor, note=req.note, mode=controller.mode, request_id=req.request_id)
+    return {"status": "started", "experiment_id": started["experiment_id"], "original_id": experiment_id,
+            "recommendation_index": req.recommendation_index, "duplicate": started["duplicate"]}
+
+
+@app.get("/api/followups", tags=["insights"])
+def get_followups(experiment_id: str | None = None):
+    """Persisted links between original experiments, remediations and follow-up runs,
+    with each before/after comparison and verification result."""
+    return store.followups(experiment_id)
 
 
 @app.get("/api/experiments/{experiment_id}/timeline", tags=["history"])

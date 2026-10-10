@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
-import type { FaultAction, FaultCatalog, FaultSpec, Mode, PreflightResult, Proposal, SandboxChecks, Scenario, ValidationReport } from "../api/types";
+import type { CandidatesView, FaultAction, FaultCatalog, FaultSpec, Mode, PreflightResult, Proposal, SandboxChecks, Scenario, ValidationReport } from "../api/types";
 import { ActivityLog } from "../components/ActivityLog";
 import { ActionsTable, PlanReport } from "../components/experiment";
+import { CandidateList } from "../components/followup";
 import { Badge, Button, Empty, ErrorNote, KV, List, Note, PageHeader, Panel, Skeleton, StateBadge } from "../components/ui";
 import { useAction, useAsync } from "../hooks";
 import { dateTime, humanize, num } from "../lib/format";
@@ -214,6 +215,8 @@ function ProposalPanel() {
   const client = useLiveClient();
   const [proposal, setProposal] = useState<Proposal | null>(live.orchestrator?.scenario_proposal ?? null);
   const plan = useAction(() => api.plan(), setProposal);
+  const [candidates, setCandidates] = useState<CandidatesView | null>(null);
+  const rank = useAction(() => api.candidates(), setCandidates);
   const run = useAction(() => api.runScenario({ authorize: true, proposal_id: proposal!.proposal_id, request_id: requestId() }), () => client.refresh());
   const block = useBlockReason(false);
   return (
@@ -221,24 +224,38 @@ function ProposalPanel() {
       title="Agent proposal"
       meta={proposal ? `generated ${dateTime(proposal.generated_at_utc)}` : "fault-injection agent"}
       actions={
-        <Button busy={plan.pending} onClick={() => plan.run()}>
-          {proposal ? "Propose again" : "Generate proposal"}
-        </Button>
+        <>
+          <Button busy={rank.pending} onClick={() => rank.run()}>
+            {candidates ? "Rank again" : "Rank candidates"}
+          </Button>
+          <Button busy={plan.pending} onClick={() => plan.run()}>
+            {proposal ? "Propose again" : "Generate proposal"}
+          </Button>
+        </>
       }
     >
+      {rank.error && <div className="mb-3"><ErrorNote message={rank.error} /></div>}
+      {candidates && (
+        <div className="mb-4 border-b border-line pb-4">
+          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-dim">Ranked candidates</h3>
+          <CandidateList view={candidates} selected={proposal?.validation.signature ?? null} onSelected={setProposal} disabledReason={null} />
+        </div>
+      )}
       {plan.error && <ErrorNote message={plan.error} />}
-      {!proposal && !plan.error && <Empty>No proposal yet. Generating one is read-only: it ranks candidates from stored history and never starts anything.</Empty>}
+      {!proposal && !plan.error && <Empty>No proposal yet. "Rank candidates" lists the options with their risk and evidence; "Generate proposal" lets the planner pick one. Both are read-only and never start anything.</Empty>}
       {proposal && (
         <div className="space-y-3 text-xs">
           <div className="flex flex-wrap items-center gap-2">
             <span className="num text-sm text-ink">{proposal.validation.signature}</span>
-            <Badge tone={proposal.method === "deterministic_fallback" ? "muted" : "accent"}>{proposal.method === "deterministic_fallback" ? "rule-based selection" : `model: ${proposal.method}`}</Badge>
+            <Badge tone={proposal.method === "deterministic_fallback" || proposal.method === "operator_selected" ? "muted" : "accent"}>
+              {proposal.method === "deterministic_fallback" ? "rule-based selection" : proposal.method === "operator_selected" ? "selected by operator" : `model: ${proposal.method}`}
+            </Badge>
             <Badge>rank #{proposal.ranking.rank} · score {proposal.ranking.score}</Badge>
             <Badge tone={proposal.confidence.level === "none" ? "warn" : "ok"}>
               evidence: {proposal.confidence.basis === "none" ? "none" : `${proposal.confidence.agreement} runs (${proposal.confidence.basis})`}
             </Badge>
           </div>
-          {proposal.fallback_note && <Note tone="warn">{proposal.fallback_note}</Note>}
+          {proposal.fallback_note && proposal.method !== "operator_selected" && <Note tone="warn">{proposal.fallback_note}</Note>}
           {proposal.store_degraded && <Note tone="warn">Knowledge store unavailable; ranked from experiment files only. {proposal.store_degraded}</Note>}
           <KV
             items={[

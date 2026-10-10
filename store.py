@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS timeline (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, experiment_id TEXT, proposal_id TEXT,
     type TEXT, data_json TEXT);
 CREATE INDEX IF NOT EXISTS idx_timeline_exp ON timeline(experiment_id);
+CREATE TABLE IF NOT EXISTS followups (
+    followup_id TEXT PRIMARY KEY, original_id TEXT, rec_index INTEGER, recommendation_id TEXT,
+    created_at_utc TEXT, confirmed_by TEXT, confirmation_note TEXT, status TEXT,
+    completed_at_utc TEXT, result_json TEXT);
+CREATE INDEX IF NOT EXISTS idx_followups_original ON followups(original_id);
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts_utc TEXT, actor TEXT, action TEXT, detail_json TEXT);
 """
@@ -285,6 +290,37 @@ def timeline(experiment_id: str, limit: int = 500) -> list[dict]:
                             (experiment_id, int(limit))).fetchall()
     return [{"id": r["id"], "ts": r["ts"], "type": r["type"], "data": json.loads(r["data_json"] or "{}")}
             for r in rows]
+
+
+# ---------------------------------------------------------------- follow-up runs
+def create_followup(followup_id: str, original_id: str, rec_index: int, recommendation_id: str | None,
+                    confirmed_by: str, note: str) -> None:
+    """Link a follow-up experiment to the original experiment and the remediation it tests."""
+    with _db() as conn:
+        conn.execute("INSERT OR REPLACE INTO followups VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     (followup_id, original_id, int(rec_index), recommendation_id, guard.utc_now_iso(),
+                      confirmed_by, note, "running", None, None))
+
+
+def complete_followup(followup_id: str, status: str, result: dict) -> None:
+    with _db() as conn:
+        conn.execute("UPDATE followups SET status=?, completed_at_utc=?, result_json=? WHERE followup_id=?",
+                     (status, guard.utc_now_iso(), json.dumps(result), followup_id))
+
+
+def followups(experiment_id: str | None = None) -> list[dict]:
+    """Follow-ups where the experiment is either the original or the follow-up, newest first."""
+    q, args = "SELECT * FROM followups", ()
+    if experiment_id:
+        q += " WHERE original_id=? OR followup_id=?"
+        args = (experiment_id, experiment_id)
+    with _db() as conn:
+        rows = conn.execute(q + " ORDER BY created_at_utc DESC, rowid DESC", args).fetchall()
+    return [{"followup_id": r["followup_id"], "original_id": r["original_id"], "rec_index": r["rec_index"],
+             "recommendation_id": r["recommendation_id"], "created_at_utc": r["created_at_utc"],
+             "confirmed_by": r["confirmed_by"], "confirmation_note": r["confirmation_note"],
+             "status": r["status"], "completed_at_utc": r["completed_at_utc"],
+             "result": json.loads(r["result_json"]) if r["result_json"] else None} for r in rows]
 
 
 # ---------------------------------------------------------------- audit

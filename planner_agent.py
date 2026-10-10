@@ -209,6 +209,22 @@ def propose_experiment(dependency_map: dict | None, health: dict | None, baselin
     }
 
 
+def rank_experiments(dependency_map: dict | None, history: list[dict], risk: dict | None = None,
+                     policy: dict | None = None, limit: int = 12) -> list[dict]:
+    """Ranked candidate experiments (schema 2.0): each with rank, targets, fault types, risk,
+    hypothesis, reason, expected impact and its supporting history, every one validated
+    against the fault registry, the allowlist, parameter bounds and the policy. Read-only.
+
+    Ranking uses the dependency map, calculated service risk, experiment history, coverage
+    gaps and expected information gain (learning.rank_candidates documents the formula).
+    The work lives in learning.py / scenario_planner.py; this is the planner's entry point."""
+    import learning
+    import scenario_planner
+    ranked = learning.rank_candidates(dependency_map, history, (policy or {}).get("allowed_faults"),
+                                      (policy or {}).get("allowed_targets"), policy)
+    return scenario_planner.propose_candidates(ranked, dependency_map, history, risk, policy, limit)
+
+
 if __name__ == "__main__":
     import os
     import probe

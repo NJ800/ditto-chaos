@@ -438,8 +438,11 @@ class ScenarioRun:
                  policy: dict | None = None, stop_event: asyncio.Event | None = None,
                  on_event: Callable[[str, dict], None] | None = None,
                  on_update: Callable[[dict], None] | None = None, meta: dict | None = None,
-                 dry_run: bool = False):
+                 dry_run: bool = False, fresh_baseline: bool = False):
         self.scn, self.authorization, self.dep_map, self.policy = scn, authorization, dep_map, policy
+        # True = ignore baseline.json and measure the baseline from this run's own pre-check
+        # ticks (used by follow-up runs, which must re-capture a healthy baseline).
+        self.fresh_baseline = fresh_baseline
         # A dry run walks the same lifecycle with real health probes but executes NO Docker
         # command at all: targets are synthetic and every command is only recorded.
         self.dry_run = dry_run
@@ -537,6 +540,7 @@ class ScenarioRun:
             else None,
             "mode": self.meta.get("mode"), "source": self.meta.get("source", "operator"),
             "proposal": self.meta.get("proposal"), "prediction": self.meta.get("prediction"),
+            "followup_of": self.meta.get("followup_of"), "followup_comparison": None,
             "hypothesis": self.scn.hypothesis, "dependency_context": edges,
             "dry_run": self.dry_run, "simulated": self.dry_run,
             "events": [], "event_seq": 0,
@@ -756,10 +760,22 @@ class ScenarioRun:
                                            "failing); refusing to inject.")
                 self._log("info", f"Pre-check passed: Ditto answered direct reads and searches on the last "
                                   f"{min(2, len(pre))} of {len(pre)} tick(s).")
-                file_baseline = guard.load_baseline()
+                file_baseline = None if self.fresh_baseline else guard.load_baseline()
                 baseline, source = (file_baseline, "file") if file_baseline is not None \
                     else (probe.summarize(pre), "fresh")
-                guard.validate_baseline(baseline, source, guard.MAX_BASELINE_AGE_S_DEFAULT)
+                try:
+                    guard.validate_baseline(baseline, source, guard.MAX_BASELINE_AGE_S_DEFAULT)
+                except guard.GuardError as e:
+                    if not (self.dry_run and source == "file"):
+                        raise
+                    # A dry run exists to show what would happen, so it says that a real run
+                    # would stop here and carries on with a baseline measured just now.
+                    self._log("warning", f"A REAL run would be refused at this point: {e} The dry run continues "
+                                         f"with a baseline measured from its own pre-check ticks.",
+                              real_run_would_be_refused=True)
+                    rec["real_run_blocker"] = str(e)
+                    baseline, source = probe.summarize(pre), "fresh"
+                    guard.validate_baseline(baseline, source, guard.MAX_BASELINE_AGE_S_DEFAULT)
                 rec["baseline"], rec["baseline_source"] = baseline, source
                 activity.thresholds(rec, baseline, self.th, source)
 

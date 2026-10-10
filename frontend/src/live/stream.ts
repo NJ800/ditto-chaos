@@ -52,6 +52,7 @@ export interface LiveState {
   services: ServicesView | null;
   rows: MetricRow[];
   baseline: Baseline | null;
+  baselineMaxAgeS: number | null;
   thresholds: Thresholds | null;
   orchestrator: OrchestratorStatus | null;
   controller: ControllerStatus | null;
@@ -75,6 +76,7 @@ export const initialState: LiveState = {
   services: null,
   rows: [],
   baseline: null,
+  baselineMaxAgeS: null,
   thresholds: null,
   orchestrator: null,
   controller: null,
@@ -115,6 +117,7 @@ export function applySnapshot(state: LiveState, snap: Snapshot, now: number): Li
     services: snap.services,
     rows: mergeRows(sameBoot ? state.rows : [], snap.rows),
     baseline: snap.baseline,
+    baselineMaxAgeS: snap.baseline_max_age_s ?? null,
     thresholds: snap.thresholds,
     orchestrator: snap.orchestrator,
     controller: snap.controller,

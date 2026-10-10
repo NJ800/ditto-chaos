@@ -404,3 +404,101 @@ def summarize(history: list[dict]) -> dict:
             "simulated_or_not_injected": len(history) - len(ev),
             "single_fault_coverage": {"covered": len(covered), "possible": len(all_singles)},
             "patterns": patterns, "model": MODEL_STATUS, "weights": WEIGHTS}
+
+
+# ---------------------------------------------------------------- before / after comparison
+# (key, label, unit, absolute tolerance, relative tolerance). Lower is better for all of
+# them. A change smaller than max(abs, rel * |before|) is reported as "unchanged".
+COMPARE_METRICS = [
+    ("direct_latency_p95_ms", "Direct read latency p95 (during fault)", "ms", 5.0, 0.10),
+    ("search_latency_p95_ms", "Search latency p95 (during fault)", "ms", 5.0, 0.10),
+    ("direct_error_rate", "Direct read error rate (during fault)", "ratio", 0.02, 0.0),
+    ("search_error_rate", "Search error rate (during fault)", "ratio", 0.02, 0.0),
+    ("stale_p95_s", "Twin staleness p95 (during fault)", "s", 0.5, 0.10),
+    ("lost_acked_max", "Lost acknowledged updates (max)", "count", 0.0, 0.0),
+    ("search_drift_max", "Search drift (max twins)", "count", 0.0, 0.0),
+    ("recovery_s", "Recovery time after rollback", "s", 2.0, 0.10),
+]
+CORRELATION_CAVEAT = ("Observed correlation, not proof of causation: this compares one run before the change "
+                      "with one run after it. Load, timing and anything else that differed between the two "
+                      "runs can also explain a difference.")
+
+
+def _metric_value(record: dict, key: str):
+    during = record.get("during") or {}
+    if key == "direct_latency_p95_ms":
+        return _p95(during, "direct_ms")
+    if key == "search_latency_p95_ms":
+        return _p95(during, "search_ms")
+    if key == "recovery_s":
+        return _num(record.get("recovery_s"))
+    return _num(during.get(key))
+
+
+def compare_runs(original: dict, followup: dict) -> dict:
+    """Metric-by-metric comparison of an original run and its follow-up. A measurement that
+    is missing on either side is 'not_comparable' with the reason -- never treated as zero."""
+    reasons = []
+    for label, rec in (("original", original), ("follow-up", followup)):
+        if rec.get("dry_run") or rec.get("simulated"):
+            reasons.append(f"the {label} run was a dry run")
+        elif not rec.get("injected"):
+            reasons.append(f"no fault was injected in the {label} run")
+    sig_a, sig_b = signature_of(original), signature_of(followup)
+    if sig_a != sig_b:
+        reasons.append(f"the scenarios differ ('{sig_a}' versus '{sig_b}')")
+    pa = {f"{a['fault']}@{a['target']}": a["params"] for a in actions_of(original)}
+    pb = {f"{a['fault']}@{a['target']}": a["params"] for a in actions_of(followup)}
+    param_diffs = []
+    for key in sorted(set(pa) & set(pb)):
+        for name in sorted((set(pa[key]) | set(pb[key])) - {"ttl_s", "iface"}):
+            if pa[key].get(name) != pb[key].get(name):
+                param_diffs.append(f"{key}.{name}: {pa[key].get(name)} -> {pb[key].get(name)}")
+    comparable = not reasons
+
+    metrics = []
+    for key, label, unit, abs_tol, rel_tol in COMPARE_METRICS:
+        before, after = _metric_value(original, key), _metric_value(followup, key)
+        row = {"key": key, "label": label, "unit": unit, "before": before, "after": after,
+               "change": None, "change_pct": None, "verdict": "not_comparable", "reason": None}
+        if not comparable:
+            row["reason"] = "the two runs are not comparable"
+        elif key == "recovery_s" and (before is None or after is None):
+            ta, tb = original.get("recovery_outcome"), followup.get("recovery_outcome")
+            if ta == "timeout" and tb == "recovered":
+                row.update(verdict="improved", reason="the original did not recover within its timeout; the "
+                                                      "follow-up recovered")
+            elif ta == "recovered" and tb == "timeout":
+                row.update(verdict="regressed", reason="the original recovered; the follow-up did not recover "
+                                                       "within its timeout")
+            else:
+                row["reason"] = (f"recovery time was not measured in the "
+                                 f"{'original' if before is None else 'follow-up'} run "
+                                 f"(recovery outcome: {ta if before is None else tb})")
+        elif before is None or after is None:
+            missing = "both runs" if before is None and after is None else \
+                "the original run" if before is None else "the follow-up run"
+            row["reason"] = f"not measured in {missing}"
+        else:
+            delta = after - before
+            tol = max(abs_tol, rel_tol * abs(before))
+            row["change"] = round(delta, 4)
+            row["change_pct"] = round(delta / before * 100, 1) if before else None
+            row["verdict"] = "improved" if delta < -tol else "regressed" if delta > tol else "unchanged"
+            row["tolerance"] = round(tol, 4)
+        metrics.append(row)
+
+    def outcome(rec):
+        return {"id": rec.get("id"), "state": rec.get("state"), "outcome_class": observe(rec)["outcome_class"],
+                "aborted": bool(rec.get("aborted")), "abort_reason": rec.get("abort_reason"),
+                "recovery_outcome": rec.get("recovery_outcome"),
+                "fault_ticks": sum(1 for r in rec.get("timeline") or [] if r.get("phase") == "fault"),
+                "baseline_source": rec.get("baseline_source"),
+                "baseline_direct_p95_ms": _p95(rec.get("baseline"), "direct_ms")}
+    counts = Counter(m["verdict"] for m in metrics)
+    return {"original_id": original.get("id"), "followup_id": followup.get("id"),
+            "signature": sig_a, "comparable": comparable, "not_comparable_reasons": reasons,
+            "parameter_differences": param_diffs, "metrics": metrics,
+            "summary": {k: counts.get(k, 0) for k in ("improved", "regressed", "unchanged", "not_comparable")},
+            "outcomes": {"original": outcome(original), "followup": outcome(followup)},
+            "caveat": CORRELATION_CAVEAT}

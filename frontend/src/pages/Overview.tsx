@@ -59,6 +59,8 @@ export function Overview() {
   const orch = live.orchestrator;
   const rec = orch?.record ?? null;
   const active = rec?.actions?.filter((a) => ["applying", "applied", "uncertain"].includes(a.status)).length ?? 0;
+  const baseAge = base?.recorded_at ? now / 1000 - base.recorded_at : null;
+  const baseExpired = baseAge !== null && live.baselineMaxAgeS !== null && baseAge > live.baselineMaxAgeS;
   const ratio = (v: number | null | undefined, b: number | null | undefined) => (v && b ? `${(v / b).toFixed(1)}x baseline (${num(b, 0)} ms)` : "no baseline");
 
   return (
@@ -105,7 +107,14 @@ export function Overview() {
             <p className="mt-2 text-xxs text-faint">This is the health of the monitoring itself, reported separately from the target's.</p>
           </Panel>
 
-          <Panel title="Baseline" meta={base?.recorded_at ? `recorded ${dateTime(base.recorded_at)}` : undefined}>
+          <Panel title="Baseline" meta={base?.recorded_at ? `recorded ${dateTime(base.recorded_at)}` : undefined} actions={base ? <Badge tone={baseExpired ? "warn" : "ok"}>{baseExpired ? "expired" : "valid"}</Badge> : undefined}>
+            {baseExpired && (
+              <div className="mb-2">
+                <Note tone="warn" role="status">
+                  This baseline is older than {Math.round((live.baselineMaxAgeS ?? 0) / 60)} minutes, so real experiments are refused until it is re-recorded: run `python main.py baseline --duration 120`. Dry runs still work.
+                </Note>
+              </div>
+            )}
             {base ? (
               <KV
                 items={[

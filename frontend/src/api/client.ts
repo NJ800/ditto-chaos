@@ -2,6 +2,7 @@
 // anywhere in the frontend -- the backend validates and authorizes every request.
 import type {
   AgentStatus,
+  CandidatesView,
   ControllerStatus,
   DependencyMap,
   ExperimentDetail,
@@ -16,6 +17,7 @@ import type {
   PreflightResult,
   Proposal,
   Recommendation,
+  RerunPlan,
   RiskView,
   SandboxChecks,
   Scenario,
@@ -136,6 +138,12 @@ export const api = {
   validate: (scenario: Scenario) => post<ValidationReport>("/api/scenarios/validate", scenario),
   preflight: (scenario: Scenario) => post<PreflightResult>("/api/scenarios/preflight", scenario, 90000),
   plan: () => post<Proposal>("/api/plan", undefined, 90000),
+  candidates: (signal?: AbortSignal) => request<CandidatesView>("/api/plan/candidates", { signal, timeoutMs: 30000 }),
+  selectCandidate: (signature: string) => post<Proposal>("/api/plan/select", { signature }),
+  rerunPlan: (experimentId: string, index: number, signal?: AbortSignal) =>
+    request<RerunPlan>(`/api/experiments/${encodeURIComponent(experimentId)}/rerun-plan?recommendation_index=${index}`, { signal }),
+  rerun: (experimentId: string, body: { recommendation_index: number; authorize: boolean; confirm_applied: boolean; note: string; request_id: string }) =>
+    post<{ status: string; experiment_id: string; original_id: string; duplicate: boolean }>(`/api/experiments/${encodeURIComponent(experimentId)}/rerun`, body, 60000),
   runScenario: (body: { authorize: boolean; dry_run?: boolean; scenario?: Scenario; proposal_id?: string; request_id: string }) =>
     post<{ status: string; experiment_id: string; duplicate: boolean }>("/api/scenarios/run", body, 60000),
   events: (id: string, afterSeq: number, signal?: AbortSignal) =>

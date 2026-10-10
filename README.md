@@ -50,7 +50,7 @@ Digital-twin platforms like Ditto sit in the critical path for fleets of real de
 | Seven agents with a coordinator and persisted run status | implemented; mocked tests; post-run pipeline run live once (on the deterministic fallback) |
 | Knowledge store (SQLite) + deterministic learning that re-ranks candidates | implemented; mocked tests; no trained model, by design |
 | Live stream (SSE) with snapshot, replay, resync; readiness/liveness | implemented; tested; observed live |
-| Redesigned 7-page dashboard | implemented; 57 component tests, production build, and a real-browser smoke test over every page (no console errors) |
+| Redesigned 7-page dashboard | implemented; 73 component tests, production build, and a real-browser smoke test over every page (no console errors) |
 | Activity log (`events` in every record, incremental API, `ActivityLog` component) and scenario dry run | implemented; mocked tests; a dry run was observed live through the API |
 
 `AUTONOMY_MODE` defaults to `recommend`, where every real fault still needs an explicit operator authorization. The autonomous loop only exists when `AUTONOMY_SANDBOX_ENABLED=true` is set in `.env`; it cannot be enabled from the dashboard. Nothing in any mode auto-applies a remediation.
@@ -206,6 +206,28 @@ python main.py run --yes                     # real: skips the prompt (non-inter
 
 `main.py run` always re-validates the proposal's target against `guard.py`'s live `ALLOWLIST` and checks current health immediately before injecting -- a proposal from a minute ago might not be safe anymore. **An AI proposal can never run on its own**: the CLI still requires the same typed confirmation `guard.py` has always required, and the API still requires `authorize: true` set by an explicit dashboard click.
 
+## Ranked experiment planner
+
+**Experiment control → Rank candidates** lists the candidate experiments in rank order. Each row shows its rank, target, fault type, risk (from the dependency map; `unknown` when there is no rating), hypothesis, the reason it is ranked there, expected impact, and the stored runs that support it. The ranking uses the dependency map, calculated service risk, experiment history, coverage gaps and expected information gain; the formula is in [docs/V2.md](docs/V2.md#how-learning-works-exactly).
+
+- Every candidate is validated against the fault registry, the target allowlist, parameter bounds and the policy. One that fails, or whose history contains an unverified rollback, is still listed but marked "not selectable" with the reason.
+- Ranking and selecting are read-only. **Select** only loads the candidate as the current proposal; running it still needs the authorization checkbox, exactly like any other proposal.
+- API: `GET /api/plan/candidates`, `POST /api/plan/select {"signature": ...}`. Code entry point: `planner_agent.rank_experiments()`.
+
+## Re-run an experiment after a fix
+
+After you have applied a remediation yourself, open the recommendation (on the experiment's page or under **Insights & learning**) and choose **Re-run experiment**.
+
+1. The panel shows the plan: the original scenario with the same faults and parameters. If it can no longer be run as it was (the original was a dry run, a target left the allowlist, a fault type is no longer supported, a parameter is now out of bounds), it says why and that a revised plan is required. It never substitutes a different scenario.
+2. Two confirmations are required: that the change **was actually applied** (accepting a recommendation is not evidence of that), and the usual authorization for real fault injection.
+3. The follow-up goes through the normal path: same locks, kill switch and verified rollback. It ignores `baseline.json` and measures a fresh baseline over 30 s, and is refused if Ditto is not healthy during that window.
+4. When it finishes, the experiment page shows **Before and after the remediation**: each metric (direct and search latency, direct and search error rate, staleness, lost acknowledged updates, search drift, recovery time) with its before value, after value, change, and `improved` / `regressed` / `unchanged`. A measurement missing on either side is shown as `not measured` / `not comparable` with the reason, never as zero.
+5. The verification result is `benefit observed`, `benefit not observed` or `inconclusive`, and the recommendation becomes `verified` or `not effective`. The result is labelled an **observed correlation, not proof of causation**: it compares one run before with one run after.
+
+The link between the original experiment, the recommendation, the follow-up run, who confirmed the change and the result is stored in the knowledge store (`GET /api/followups`) and in the follow-up's own record. API: `GET /api/experiments/{id}/rerun-plan?recommendation_index=N`, `POST /api/experiments/{id}/rerun`.
+
+An expired baseline no longer stops a **dry run**: it warns that a real run would be refused and continues with a freshly measured baseline. The Overview page marks the baseline `expired` when real runs would be refused.
+
 ## Deploy (single process, single port)
 
 This tool controls Docker on the machine it runs on, so it is deployed **on the host that runs the Ditto sandbox**, next to the Docker daemon -- not on a separate server and not inside a container without access to that daemon.
@@ -272,7 +294,7 @@ See `guard.py`'s `run_experiment()` docstring for the authoritative field list. 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q
 ```
-Last run (2026-10-10): **431 passed, 10 skipped**, no warnings, in ~22 s. Docker, Ditto and the AI provider are mocked; the 10 skipped tests are the real-Docker suite below. The suite covers the v1 code (`guard.py`, `probe.py`, planner, orchestrator, API) plus v2: fault registry, scenario engine (partial failure, emergency stop, cancellation, lockout, journal replay), agents and coordinator, learning and store, controller/autonomous loop, event bus and monitor, and the HTTP contract.
+Last run (2026-10-10): **454 passed, 10 skipped**, no warnings, in ~22 s. Docker, Ditto and the AI provider are mocked; the 10 skipped tests are the real-Docker suite below. The suite covers the v1 code (`guard.py`, `probe.py`, planner, orchestrator, API) plus v2: fault registry, scenario engine (partial failure, emergency stop, cancellation, lockout, journal replay), agents and coordinator, learning and store, controller/autonomous loop, event bus and monitor, and the HTTP contract.
 
 Real Docker (opt-in; uses one throwaway `alpine` container, never the Ditto services):
 ```powershell
@@ -285,10 +307,10 @@ Frontend:
 ```powershell
 cd frontend
 npm run typecheck   # tsc --noEmit
-npm test            # vitest: 57 tests (stream client, reducer, pages, activity log)
+npm test            # vitest: 73 tests (stream client, reducer, pages, activity log, candidates, re-run)
 npm run build
 ```
-Last run: type check clean, **57 passed** with no warnings, build OK with no warnings.
+Last run: type check clean, **73 passed** with no warnings, build OK with no warnings.
 
 Real browser (headless Chromium via Playwright; needs the backend running and `npx playwright install chromium` once):
 ```powershell

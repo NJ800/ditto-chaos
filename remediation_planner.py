@@ -81,6 +81,46 @@ def build_plan(analysis: dict) -> dict:
     }
 
 
+def verification_result(comparison: dict, finding_title: str | None, followup_finding_titles: list[str] | None,
+                        followup_verdict: str | None, expected_benefit: str | None = None) -> dict:
+    """Was the remediation's expected benefit demonstrated by the follow-up run?
+
+    Pure function over the before/after comparison. It never claims proof: the strongest
+    answer is "observed", meaning the targeted finding did not recur and nothing got worse
+    in one follow-up run. `demonstrated` is one of observed | not_observed | inconclusive."""
+    summary = comparison.get("summary") or {}
+    improved, regressed = summary.get("improved", 0), summary.get("regressed", 0)
+    recurred = None if followup_finding_titles is None or not finding_title else \
+        finding_title in followup_finding_titles
+    if not comparison.get("comparable"):
+        demonstrated = "inconclusive"
+        statement = "The two runs cannot be compared: " + "; ".join(comparison.get("not_comparable_reasons") or [])
+    elif followup_verdict not in (None, "conclusive"):
+        demonstrated = "inconclusive"
+        statement = (f"The follow-up run was judged '{followup_verdict}' by the validation agent, so it does "
+                     f"not count as evidence either way.")
+    elif recurred is None:
+        demonstrated = "inconclusive"
+        statement = ("The follow-up run could not be analysed, so it is unknown whether the finding recurred. "
+                     f"{improved} metric(s) improved and {regressed} regressed.")
+    elif recurred:
+        demonstrated = "not_observed"
+        statement = (f"The finding '{finding_title}' recurred in the follow-up run "
+                     f"({improved} metric(s) improved, {regressed} regressed).")
+    elif regressed and not improved:
+        demonstrated = "not_observed"
+        statement = (f"The finding '{finding_title}' did not recur, but {regressed} metric(s) regressed and "
+                     f"none improved.")
+    else:
+        demonstrated = "observed"
+        statement = (f"The finding '{finding_title}' did not recur in the follow-up run; {improved} metric(s) "
+                     f"improved, {regressed} regressed.")
+    return {"demonstrated": demonstrated, "statement": statement, "finding_title": finding_title,
+            "finding_recurred": recurred, "expected_benefit": expected_benefit,
+            "evidence_strength": "observed correlation from one follow-up run",
+            "caveat": comparison.get("caveat")}
+
+
 def to_markdown(plan: dict) -> str:
     lines = [
         f"# Remediation plan for experiment `{plan['experiment_id']}`\n",
