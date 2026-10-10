@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
+import { optionalFleet } from "../components/fleet";
 import type { CandidatesView, FaultAction, FaultCatalog, FaultSpec, Mode, PreflightResult, Proposal, SandboxChecks, Scenario, ValidationReport } from "../api/types";
 import { ActivityLog } from "../components/ActivityLog";
 import { ActionsTable, PlanReport } from "../components/experiment";
+import { ScopePicker } from "../components/fleet";
 import { CandidateList } from "../components/followup";
 import { Badge, Button, Empty, ErrorNote, KV, List, Note, PageHeader, Panel, Skeleton, StateBadge } from "../components/ui";
 import { useAction, useAsync } from "../hooks";
@@ -360,7 +362,9 @@ function Builder({ catalog }: { catalog: FaultCatalog }) {
   const [maxDuration, setMaxDuration] = useState(60);
   const [report, setReport] = useState<ValidationReport | null>(null);
   const [pre, setPre] = useState<PreflightResult | null>(null);
-  const scenario: Scenario = { name: "operator scenario", actions, max_duration_s: maxDuration };
+  const [scope, setScope] = useState<string[]>([]);
+  const fleet = useAsync(optionalFleet, []);
+  const scenario: Scenario = { name: "operator scenario", actions, max_duration_s: maxDuration, observe_profiles: scope.length ? scope : null };
   const edit = (next: FaultAction[]) => {
     setActions(next);
     setReport(null); // a preview only describes the scenario it was computed for
@@ -408,6 +412,18 @@ function Builder({ catalog }: { catalog: FaultCatalog }) {
             }}
           />
         </div>
+        <div>
+          <span className="label">Observe product categories (optional)</span>
+          <ScopePicker
+            fleet={fleet.data ?? null}
+            value={scope}
+            onChange={(v) => {
+              setScope(v);
+              setReport(null);
+              setPre(null);
+            }}
+          />
+        </div>
         <Button variant="primary" busy={validate.pending} onClick={() => validate.run()}>
           Preview plan
         </Button>
@@ -419,6 +435,7 @@ function Builder({ catalog }: { catalog: FaultCatalog }) {
         </Button>
       </div>
       <p className="mt-2 text-xxs text-faint">
+        The observation scope only chooses which product categories to highlight: a fault on a shared service can affect every category, and all of them are measured and reported.{" "}
         Preview, preflight and dry run never inject anything. Preview is a pure policy check; preflight only inspects the containers; a dry run walks the whole lifecycle with real health checks and lists every command it would run, without executing any.
       </p>
       {(validate.error || preflight.error || dryRun.error) && <div className="mt-2"><ErrorNote message={(validate.error || preflight.error || dryRun.error)!} /></div>}

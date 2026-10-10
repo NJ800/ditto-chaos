@@ -1,6 +1,7 @@
 """HTTP contract of the v2 API. Uses TestClient as a context manager so the lifespan
 (startup recovery, monitor) and background experiment tasks really run. Docker is
 FakeDocker; nothing here reaches a real daemon or a real Ditto."""
+import asyncio
 import json
 import os
 import time
@@ -238,8 +239,16 @@ def test_multi_fault_run_end_to_end_over_http(client):
     assert agents_view["learning"]["last"]["status"] == "completed" and agents_view["learning"]["recent"]
 
 
-def test_second_request_while_running_is_409_and_stop_rolls_back(client):
-    long = {**SCN, "max_duration_s": 300, "actions": [{"fault": "pause", "target": "things"}]}
+def test_second_request_while_running_is_409_and_stop_rolls_back(client, monkeypatch):
+    # Virtual time alone can finish the whole 300s run before the first status poll on a
+    # slow machine; a small real delay per tick keeps it observable until the stop.
+    virtual_sleep = asyncio.sleep
+
+    async def paced_sleep(delay, *a, **kw):
+        await virtual_sleep(delay)
+        await asyncio.tasks.sleep(0.01)
+    monkeypatch.setattr(asyncio, "sleep", paced_sleep)
+    long ={**SCN, "max_duration_s": 300, "actions": [{"fault": "pause", "target": "things"}]}
     assert client.post("/api/scenarios/run", json={"authorize": True, "scenario": long}).status_code == 200
     r = client.post("/api/scenarios/run", json={"authorize": True, "scenario": SCN})
     assert r.status_code == 409 and r.json()["code"] == "conflict"

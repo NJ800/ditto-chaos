@@ -151,6 +151,24 @@ try {
   await open("/dependencies", "Dependencies");
   await shot("dependencies");
 
+  // Products & twins: real fleet data, a filter that is applied by the backend, a live twin read.
+  await open("/fleet", "Products & digital twins");
+  await page.getByText("Synthetic data.").first().waitFor();
+  await page.getByRole("heading", { level: 2, name: "Health by product category" }).waitFor();
+  const category = page.getByLabel("Product category");
+  const firstProfile = await category.locator("option").nth(1).getAttribute("value");
+  const filtered = page.waitForResponse((r) => r.url().includes(`/api/fleet/twins?profile=${firstProfile}`) && r.ok());
+  await category.selectOption(firstProfile);
+  await filtered;
+  const twin = page.locator("table button.num").first();
+  const twinId = await twin.textContent();
+  const detail = page.waitForResponse((r) => r.url().includes(`/api/fleet/twins/${encodeURIComponent(twinId)}`) && r.ok());
+  await twin.click();
+  await detail;
+  await page.getByText(/read live from Ditto/).waitFor({ timeout: 15000 });
+  await shot("fleet");
+  console.log("ok   fleet filter + live twin detail");
+
   await page.goto(BASE + "/no-such-page", { waitUntil: "domcontentloaded" });
   await page.getByText("This page does not exist.").waitFor();
   console.log("ok   404 route");

@@ -37,7 +37,9 @@ import activity
 import config
 import faults
 import guard
+import fleet
 import probe
+import profiles
 
 SCHEMA_VERSION = "2.0"
 clock = time.monotonic   # indirection so tests can drive scenario time deterministically
@@ -48,7 +50,6 @@ TERMINAL_STATES = {guard.STATE_COMPLETED, guard.STATE_ABORTED, guard.STATE_FAILE
                    guard.STATE_RECOVERY_TIMEOUT, STATE_RECOVERY_REQUIRED}
 
 SCENARIO_LOCK = "_scenario"
-FRESH_BASELINE_S = 30.0   # window used when baseline.json is stale and a fresh one is measured
 APPLY_TIMEOUT_S = guard.DOCKER_CMD_TIMEOUT_S * 2 + 30
 
 # Cross-target combinations that are allowed to run together, by fault category. This is
@@ -89,6 +90,9 @@ class Scenario(BaseModel):
     max_duration_s: float = Field(60, ge=10, le=600)
     pre_s: float = Field(10, ge=2, le=60)
     recovery_timeout_s: float = Field(180, ge=20, le=600)
+    # Product profiles the operator wants to watch. Observation only: it never narrows what
+    # a fault can affect, and the record still reports the impact on every profile.
+    observe_profiles: list[str] | None = Field(None, max_length=20)
 
 
 class Authorization(BaseModel):
@@ -236,6 +240,31 @@ def validate(scn: Scenario, dep_map: dict | None = None, policy: dict | None = N
             err("policy_duration", f"max_duration_s={scn.max_duration_s:g}, this policy allows "
                                    f"{policy['max_duration_s']:g}")
 
+    scope = None
+    if scn.observe_profiles is not None:
+        scope = []
+        try:
+            enabled = set(fleet.current().prefixes)
+        except fleet.FleetConfigError as e:
+            enabled = None
+            warn("fleet_unavailable", f"observation scope not checked against the fleet: {e}")
+        for name in scn.observe_profiles:
+            try:
+                key = profiles.get(name).key
+            except KeyError as e:
+                err("unknown_profile", str(e).strip("'\""))
+                continue
+            if enabled is not None and key not in enabled:
+                err("profile_not_in_fleet", f"profile '{key}' has no twins in the running fleet "
+                                            f"(enabled: {', '.join(sorted(enabled))})")
+                continue
+            if key not in scope:
+                scope.append(key)
+        if scope:
+            warn("observation_scope", "the observation scope only selects what is highlighted: a fault on a "
+                                      "shared service can affect every product profile, and all of them are "
+                                      "measured and reported")
+
     fan_in = _fan_in(dep_map)
     apply_order = [a["id"] for a in sorted(valid, key=lambda a: (a["start_offset_s"], a["index"]))]
     rank = {aid: n for n, aid in enumerate(apply_order)}
@@ -246,7 +275,7 @@ def validate(scn: Scenario, dep_map: dict | None = None, policy: dict | None = N
             "affected_services": targets, "cumulative_intensity": intensity,
             "max_concurrent_faults": concurrent, "apply_order": apply_order,
             "rollback_order": rollback_order, "limits": limits, "policy": policy,
-            "signature": signature(valid) if valid else ""}
+            "observe_profiles": scope, "signature": signature(valid) if valid else ""}
 
 
 async def preflight_check(scn: Scenario, dep_map: dict | None = None) -> dict:
@@ -552,6 +581,8 @@ class ScenarioRun:
             "reverted": False, "reverted_at": None, "rollback_verified": False, "rollback_error": None,
             "recovery_s": None, "recovery_outcome": None, "error": None,
             "safety_events": [], "timeline": [], "during": None,
+            "fleet": fleet.record_metadata(), "observe_profiles": self.report.get("observe_profiles"),
+            "profile_impact": None,
         }
         self._sync()
 
@@ -703,7 +734,7 @@ class ScenarioRun:
         try:
             async with httpx.AsyncClient(base_url=config.DITTO_URL, auth=(config.DITTO_USER, config.DITTO_PASS),
                                          timeout=config.REQUEST_TIMEOUT_S) as client:
-                ids = config.all_car_ids()
+                ids = fleet.current().ids
 
                 async def tick(phase: str) -> dict:
                     t = clock()
@@ -767,19 +798,14 @@ class ScenarioRun:
                 try:
                     guard.validate_baseline(baseline, source, guard.MAX_BASELINE_AGE_S_DEFAULT)
                 except guard.GuardError as e:
-                    if source != "file":
+                    if not (self.dry_run and source == "file"):
                         raise
-                    # baseline.json is missing a timestamp, expired or unhealthy. Rather than
-                    # stopping, measure a fresh one now over a longer window. If Ditto is not
-                    # healthy during it, validate_baseline() below still refuses the run.
-                    rec["baseline_file_problem"] = str(e)
-                    want = max(len(pre), round(FRESH_BASELINE_S / config.PROBE_INTERVAL_S))
-                    self._log("warning", f"baseline.json cannot be used ({str(e).split('. ')[0]}). Measuring a "
-                                         f"fresh baseline over {FRESH_BASELINE_S:g}s instead.",
-                              baseline_file_problem=str(e))
-                    if not self.dry_run:
-                        while len(pre) < want:
-                            pre.append(await tick("before"))
+                    # A dry run exists to show what would happen, so it says that a real run
+                    # would stop here and carries on with a baseline measured just now.
+                    self._log("warning", f"A REAL run would be refused at this point: {e} The dry run continues "
+                                         f"with a baseline measured from its own pre-check ticks.",
+                              real_run_would_be_refused=True)
+                    rec["real_run_blocker"] = str(e)
                     baseline, source = probe.summarize(pre), "fresh"
                     guard.validate_baseline(baseline, source, guard.MAX_BASELINE_AGE_S_DEFAULT)
                 rec["baseline"], rec["baseline_source"] = baseline, source
@@ -982,6 +1008,7 @@ class ScenarioRun:
             rec["state"] = state
         fault_rows = [r for r in rec["timeline"] if r.get("phase") == "fault"]
         rec["during"] = probe.summarize(fault_rows) if fault_rows else None
+        rec["profile_impact"] = fleet.profile_impact(rec["timeline"], rec.get("observe_profiles"))
         rec["ended_at_utc"] = guard.utc_now_iso()
         if rec["state"] == STATE_RECOVERY_REQUIRED:
             items = [{"experiment_id": self.id, "action": a.id, "fault": a.fault_name, "target": a.target,

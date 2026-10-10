@@ -172,7 +172,64 @@ def to_case(record: dict, analysis: dict | None = None) -> dict:
         "severity": (analysis or {}).get("severity"),
         "finding_titles": [f.get("title") for f in (analysis or {}).get("findings", [])
                            if isinstance(f, dict)],
+        **profile_case(record),
     }
+
+
+def profile_case(record: dict) -> dict:
+    """Per-product-profile view of one record for the history. Records from before
+    multi-product support have no fleet metadata; they are labelled, not guessed."""
+    fl, impact = record.get("fleet") or {}, record.get("profile_impact") or {}
+    outcomes = {k: {"status": v.get("status"), "symptoms": v.get("symptoms") or [], "recovered": v.get("recovered"),
+                    "in_scope": v.get("in_scope")}
+                for k, v in (impact.get("profiles") or {}).items()}
+    return {
+        "fleet_profiles": sorted((fl.get("profiles") or {})) or None,
+        "fleet_signature": fl.get("signature"),
+        "legacy_fleet": None if record.get("fleet") else "car-only fleet (inferred: recorded before multi-product support)",
+        "profile_outcomes": outcomes or None,
+        "affected_profiles": impact.get("affected_profiles") or [],
+        "system_wide_symptoms": impact.get("system_wide_symptoms") or [],
+        "observe_profiles": record.get("observe_profiles"),
+    }
+
+
+def profile_patterns(history: list[dict]) -> dict:
+    """What has happened to each product profile across stored evidence runs, separating
+    symptoms every measured profile shared in a run (system-wide) from those only some
+    profiles showed (product-specific). Counts only -- no model, no extrapolation."""
+    ev = _evidence(history)
+    with_data = [c for c in ev if c.get("profile_outcomes")]
+    per: dict[str, dict] = {}
+    system = Counter()
+    for c in with_data:
+        shared = set(c.get("system_wide_symptoms") or [])
+        system.update(shared)
+        for k, o in c["profile_outcomes"].items():
+            p = per.setdefault(k, {"profile": k, "runs_observed": 0, "runs_measured": 0, "runs_affected": 0,
+                                   "runs_not_recovered": 0, "symptoms": Counter(),
+                                   "product_specific_symptoms": Counter(), "affected_by_targets": Counter(),
+                                   "experiments": []})
+            p["runs_observed"] += 1
+            p["runs_measured"] += int(o.get("status") != "not_measured")
+            if o.get("status") == "affected":
+                p["runs_affected"] += 1
+                p["affected_by_targets"].update(c.get("targets") or [])
+            p["symptoms"].update(o.get("symptoms") or [])
+            p["product_specific_symptoms"].update(set(o.get("symptoms") or []) - shared)
+            p["runs_not_recovered"] += int(o.get("recovered") is False)
+            p["experiments"].append(c["id"])
+    profiles_out = []
+    for p in per.values():
+        profiles_out.append({**p, "symptoms": dict(p["symptoms"]),
+                             "product_specific_symptoms": dict(p["product_specific_symptoms"]),
+                             "affected_by_targets": dict(p["affected_by_targets"]),
+                             "experiments": p["experiments"][-8:]})
+    profiles_out.sort(key=lambda p: -p["runs_affected"])
+    return {"runs_with_profile_data": len(with_data), "legacy_runs_without_profile_data": len(ev) - len(with_data),
+            "system_wide_symptoms": dict(system), "profiles": profiles_out,
+            "note": "symptoms seen in every measured profile of a run count as system-wide; the rest are "
+                    "product-specific"}
 
 
 def _ts(case: dict) -> float:
@@ -403,7 +460,8 @@ def summarize(history: list[dict]) -> dict:
     return {"total_records": len(history), "evidence_runs": len(ev),
             "simulated_or_not_injected": len(history) - len(ev),
             "single_fault_coverage": {"covered": len(covered), "possible": len(all_singles)},
-            "patterns": patterns, "model": MODEL_STATUS, "weights": WEIGHTS}
+            "patterns": patterns, "model": MODEL_STATUS, "weights": WEIGHTS,
+            "by_profile": profile_patterns(history)}
 
 
 # ---------------------------------------------------------------- before / after comparison

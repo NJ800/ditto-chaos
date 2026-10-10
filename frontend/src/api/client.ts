@@ -9,6 +9,7 @@ import type {
   ExperimentEventsResponse,
   ExperimentSummary,
   FaultCatalog,
+  FleetView,
   LearningView,
   Lockout,
   Mode,
@@ -22,8 +23,31 @@ import type {
   SandboxChecks,
   Scenario,
   Snapshot,
+  TwinDetail,
+  TwinList,
   ValidationReport,
 } from "./types";
+
+/** Query string from the defined, non-empty values only. */
+export function query(params: Record<string, string | number | null | undefined>): string {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== null && v !== undefined && v !== "") q.set(k, String(v));
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+export interface ExperimentFilters {
+  profile?: string;
+  service?: string;
+  twin?: string;
+}
+
+export interface TwinFilters {
+  profile?: string;
+  kind?: string;
+  status?: string;
+  q?: string;
+}
 
 // Development (vite on :5173) talks to the API on :8000. A production build is served by
 // the API itself (`python main.py serve`), so it uses the page's own origin.
@@ -160,13 +184,18 @@ export const api = {
   resolveRecovery: (force: boolean, note: string) =>
     post<{ lockout: Lockout | null; recovered: unknown[]; failed: unknown[] }>("/api/recovery/resolve", { force, note }, 120000),
 
-  experiments: (signal?: AbortSignal) => request<ExperimentSummary[]>("/api/experiments", { signal }),
+  experiments: (signal?: AbortSignal, filters: ExperimentFilters = {}) =>
+    request<ExperimentSummary[]>(`/api/experiments${query({ ...filters })}`, { signal }),
   experiment: (id: string, signal?: AbortSignal) => request<ExperimentDetail>(`/api/experiments/${encodeURIComponent(id)}`, { signal }),
 
   learning: (signal?: AbortSignal) => request<LearningView>("/api/learning", { signal }),
   recommendations: (signal?: AbortSignal) => request<Recommendation[]>("/api/recommendations", { signal }),
   setRecommendation: (experimentId: string, index: number, status: string, note = "") =>
     post<Recommendation>(`/api/recommendations/${encodeURIComponent(experimentId)}/${index}/status`, { status, note }),
+
+  fleet: (signal?: AbortSignal) => request<FleetView>("/api/fleet", { signal }),
+  fleetTwins: (filters: TwinFilters, signal?: AbortSignal) => request<TwinList>(`/api/fleet/twins${query({ ...filters })}`, { signal }),
+  fleetTwin: (id: string, signal?: AbortSignal) => request<TwinDetail>(`/api/fleet/twins/${encodeURIComponent(id)}`, { signal }),
 
   dependencies: (signal?: AbortSignal) => request<DependencyMap>("/api/dependencies", { signal }),
   refreshDependencies: () => post<DependencyMap>("/api/dependencies/refresh", undefined, 60000),

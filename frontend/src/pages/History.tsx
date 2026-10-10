@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
+import { optionalFleet } from "../components/fleet";
 import type { ExperimentSummary } from "../api/types";
 import { ActivityLog } from "../components/ActivityLog";
 import { ActionsTable, AgentRuns, Findings, LearningCard, Recommendations, Timeline } from "../components/experiment";
 import { Followups } from "../components/followup";
 import { MetricChart } from "../components/MetricChart";
+import { ProfileImpactTable } from "../components/fleet";
 import { Badge, Button, Empty, ErrorNote, KV, List, Note, PageHeader, Panel, Skeleton, StateBadge } from "../components/ui";
 import { useAsync } from "../hooks";
 import { dateTime, humanize, num } from "../lib/format";
@@ -23,12 +25,31 @@ export function filterExperiments(rows: ExperimentSummary[], q: string, outcome:
 
 export function History() {
   const live = useLive();
-  const list = useAsync((s) => api.experiments(s), [live.activity]);
+  const [params, setParams] = useSearchParams();
+  const profile = params.get("profile") ?? "";
+  const service = params.get("service") ?? "";
+  const twin = params.get("twin") ?? "";
+  const setParam = (k: string, v: string) => {
+    const next = new URLSearchParams(params);
+    if (v) next.set(k, v);
+    else next.delete(k);
+    setParams(next, { replace: true });
+  };
+  const fleet = useAsync(optionalFleet, []);
+  const list = useAsync((s) => api.experiments(s, { profile, service, twin }), [live.activity, profile, service, twin]);
   const [q, setQ] = useState("");
   const [outcome, setOutcome] = useState("");
   const [evidenceOnly, setEvidenceOnly] = useState(false);
   const rows = useMemo(() => filterExperiments(list.data ?? [], q, outcome, evidenceOnly), [list.data, q, outcome, evidenceOnly]);
   const outcomes = useMemo(() => Array.from(new Set((list.data ?? []).map((e) => e.outcome_class))).sort(), [list.data]);
+  const services = useMemo(() => Array.from(new Set((list.data ?? []).flatMap((e) => e.targets))).sort(), [list.data]);
+  const titles = fleet.data?.registry ?? {};
+  const profileOptions = useMemo(() => {
+    const keys = new Set<string>(fleet.data?.enabled ?? []);
+    for (const e of list.data ?? []) for (const k of e.fleet_profiles ?? []) keys.add(k);
+    if (profile) keys.add(profile);
+    return Array.from(keys);
+  }, [fleet.data, list.data, profile]);
 
   return (
     <div className="space-y-4">
@@ -40,6 +61,23 @@ export function History() {
         actions={
           <>
             <input className="field w-48" type="search" placeholder="Search id, fault, target, reason" aria-label="Search experiments" value={q} onChange={(e) => setQ(e.target.value)} />
+            <select className="field" aria-label="Product category filter" value={profile} onChange={(e) => setParam("profile", e.target.value)}>
+              <option value="">all categories</option>
+              {profileOptions.map((k) => (
+                <option key={k} value={k}>
+                  {titles[k]?.title ?? k}
+                </option>
+              ))}
+            </select>
+            <select className="field" aria-label="Service filter" value={service} onChange={(e) => setParam("service", e.target.value)}>
+              <option value="">all services</option>
+              {Array.from(new Set([...services, ...(service ? [service] : [])])).map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+            <input className="field w-44" type="text" placeholder="Twin id (exact)" aria-label="Twin filter" defaultValue={twin} onKeyDown={(e) => { if (e.key === "Enter") setParam("twin", (e.target as HTMLInputElement).value.trim()); }} onBlur={(e) => setParam("twin", e.target.value.trim())} />
             <select className="field" aria-label="Outcome filter" value={outcome} onChange={(e) => setOutcome(e.target.value)}>
               <option value="">all outcomes</option>
               {outcomes.map((o) => (
@@ -63,7 +101,7 @@ export function History() {
             <Skeleton rows={5} />
           </div>
         ) : !list.data?.length ? (
-          <Empty>No experiments saved yet.</Empty>
+          <Empty>{profile || service || twin ? "No experiment matches these filters." : "No experiments saved yet."}</Empty>
         ) : !rows.length ? (
           <Empty>No experiment matches these filters.</Empty>
         ) : (
@@ -71,7 +109,7 @@ export function History() {
             <table className="w-full min-w-[980px] border-collapse text-xs">
               <thead>
                 <tr>
-                  {["Started", "Experiment", "Scenario", "State", "Outcome", "Symptoms", "Recovery", "Rollback"].map((h) => (
+                  {["Started", "Experiment", "Scenario", "State", "Outcome", "Symptoms", "Product impact", "Recovery", "Rollback"].map((h) => (
                     <th key={h} className="th">
                       {h}
                     </th>
@@ -100,6 +138,15 @@ export function History() {
                       {e.validation_verdict && e.validation_verdict !== "conclusive" && <div className="mt-0.5 text-xxs text-warn">{e.validation_verdict}</div>}
                     </td>
                     <td className="td text-dim">{e.symptoms.length ? e.symptoms.map(humanize).join(", ") : "—"}</td>
+                    <td className="td text-dim">
+                      {e.legacy_fleet ? (
+                        <span className="text-faint" title={e.legacy_fleet}>car-only run</span>
+                      ) : e.affected_profiles?.length ? (
+                        e.affected_profiles.map((k) => titles[k]?.title ?? k).join(", ")
+                      ) : (
+                        <span className="text-faint">none measured</span>
+                      )}
+                    </td>
                     <td className="td num">{e.recovery_s !== null ? `${e.recovery_s}s` : humanize(e.recovery_outcome)}</td>
                     <td className="td">{!e.injected ? <span className="text-faint">not injected</span> : e.rollback_verified ? <Badge tone="ok">verified</Badge> : <Badge tone="bad">not verified</Badge>}</td>
                   </tr>
@@ -175,6 +222,16 @@ export function ExperimentDetailPage() {
           </Panel>
         </div>
       </div>
+
+      <Panel
+        title="Impact by product category"
+        meta={rec.fleet && !rec.fleet.error ? `${rec.fleet.total_twins} synthetic twins: ${Object.entries(rec.fleet.profiles).map(([, p]) => `${p.count} ${p.title.toLowerCase()}`).join(", ")}` : undefined}
+        flush
+      >
+        <div className="p-3">
+          <ProfileImpactTable impact={rec.profile_impact} legacy={!rec.fleet} />
+        </div>
+      </Panel>
 
       <Panel title="Measurements during the run" meta={`${rec.timeline?.length ?? 0} probe ticks; the shaded band is the fault interval`}>
         <MetricChart

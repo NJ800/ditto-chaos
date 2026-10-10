@@ -47,6 +47,8 @@ export function stateTone(state: string | null | undefined): Tone {
     case "conclusive":
     case "tolerated":
     case "ok":
+    case "fresh":
+    case "no_measured_impact":
       return "ok";
     case "RECOVERY_REQUIRED":
     case "FAILED":
@@ -56,6 +58,8 @@ export function stateTone(state: string | null | undefined): Tone {
     case "data_loss":
     case "not_effective":
     case "invalid":
+    case "missing":
+    case "fault":
     case "DISCONNECTED":
     case "down":
     case "critical":
@@ -74,6 +78,7 @@ export function stateTone(state: string | null | undefined): Tone {
     case "fallback":
     case "medium":
     case "implemented":
+    case "affected":
       return "warn";
     case "PREFLIGHT":
     case "BASELINE":

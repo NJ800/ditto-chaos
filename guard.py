@@ -43,6 +43,8 @@ import contextvars
 import json
 import math
 import os
+import re
+import socket
 import subprocess
 import sys
 import time
@@ -53,15 +55,32 @@ from datetime import datetime, timezone
 import httpx
 
 import config
+import fleet
 import probe
 
 SCHEMA_VERSION = "1.1"   # 1.1 adds the additive `events` activity log
 GUARD_VERSION = "1.2.0"
 
-COMPOSE_PROJECT = os.getenv("COMPOSE_PROJECT", "docker")
+# Values below end up in docker arguments and, for NETEM_IFACE / NETSHOOT_IMAGE, inside the
+# netshoot helper's `sh -c` script. They come from the operator's environment, but are still
+# restricted to plain names so no value can ever be interpreted by a shell.
+_ENV_PATTERNS = {
+    "COMPOSE_PROJECT": re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$"),
+    "NETEM_IFACE": re.compile(r"^[A-Za-z0-9_.-]{1,15}$"),
+    "NETSHOOT_IMAGE": re.compile(r"^[a-z0-9][a-z0-9._/-]{0,199}(:[A-Za-z0-9._-]{1,128})?(@sha256:[a-f0-9]{64})?$"),
+}
+
+
+def env_setting(name: str, value: str) -> str:
+    if not _ENV_PATTERNS[name].match(value):
+        raise ValueError(f"{name}={value!r} is not a plain name (allowed: {_ENV_PATTERNS[name].pattern})")
+    return value
+
+
+COMPOSE_PROJECT = env_setting("COMPOSE_PROJECT", os.getenv("COMPOSE_PROJECT", "docker"))
 ALLOWLIST = {"gateway", "things", "things-search", "policies", "connectivity", "mongodb"}
-NETSHOOT_IMAGE = os.getenv("NETSHOOT_IMAGE", "nicolaka/netshoot")
-NETEM_IFACE = os.getenv("NETEM_IFACE", "eth0")
+NETSHOOT_IMAGE = env_setting("NETSHOOT_IMAGE", os.getenv("NETSHOOT_IMAGE", "nicolaka/netshoot"))
+NETEM_IFACE = env_setting("NETEM_IFACE", os.getenv("NETEM_IFACE", "eth0"))
 EXPERIMENTS_DIR = os.getenv("EXPERIMENTS_DIR", "experiments")
 LOCKS_DIR = os.path.join(EXPERIMENTS_DIR, ".locks")
 
@@ -440,7 +459,7 @@ def check_breach(window: list[dict], baseline: dict, th: Thresholds) -> tuple[bo
     for row in window:
         lost = row.get("lost_acked")
         if lost:
-            return True, (f"CRITICAL: {lost} car(s) have a stored value OLDER than an update Ditto "
+            return True, (f"CRITICAL: {lost} twin(s) have a stored value OLDER than an update Ditto "
                           f"already acknowledged (confirmed silent data loss) at ts={row.get('ts')}")
 
     if len(window) < th.breach_window:
@@ -482,7 +501,17 @@ def is_healthy(row: dict, baseline: dict, th: Thresholds) -> bool:
     if base_p95 and row["direct_ms"] > max(base_p95 * th.recovery_latency_factor, th.min_latency_floor_ms):
         return False
     stale = row.get("stale_p95_s")
-    return stale is None or stale <= max(th.recovery_stale_s, config.SEND_INTERVAL_S * 3)
+    return stale is None or stale <= max(th.recovery_stale_s, slowest_update_interval_s() * 3)
+
+
+def slowest_update_interval_s() -> float:
+    """The longest update interval of any twin in the fleet. A healthy fleet's staleness
+    p95 naturally reaches it, so recovery allows three of them (for the car-only fleet this
+    is SEND_INTERVAL_S, exactly as before)."""
+    try:
+        return max(fleet.current().intervals.values(), default=config.SEND_INTERVAL_S)
+    except fleet.FleetConfigError:
+        return config.SEND_INTERVAL_S
 
 
 def load_baseline() -> dict | None:
@@ -552,14 +581,50 @@ class Lock:
     path: str
 
 
+def pid_alive(pid: int) -> bool:
+    """Does a process with this id exist on this machine? Never sends it a signal: on
+    Windows os.kill(pid, 0) would TERMINATE the process, so the kernel is queried instead."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)        # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5                   # access denied: it exists
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True                                       # cannot tell: assume alive
+            return code.value == 259                              # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _lock_is_stale(info: dict) -> bool:
+    """Stale when older than LOCK_STALE_S, or when it was taken on THIS machine by a process
+    that no longer exists (a crashed API or CLI). A lock from another host is never judged
+    by a local PID."""
+    if (time.time() - info.get("started_at", 0)) > LOCK_STALE_S:
+        return True
+    # Locks written before the host was recorded can only have come from this machine.
+    return info.get("host", socket.gethostname()) == socket.gethostname() and not pid_alive(info.get("pid"))
+
+
 def acquire_lock(target: str, force: bool = False) -> Lock:
     """File-based lock scoped to --target, so two experiments can't hit the same
-    container concurrently. Staleness is time-based (age > LOCK_STALE_S), not a PID
-    liveness check -- that's a deliberate, documented simplification that works the
-    same way cross-platform (including Windows)."""
+    container concurrently. A lock is stale after LOCK_STALE_S, or as soon as its owning
+    process on this machine is gone (so one crash does not block every run for hours)."""
     os.makedirs(LOCKS_DIR, exist_ok=True)
     path = os.path.join(LOCKS_DIR, f"{target}.lock")
-    payload = json.dumps({"pid": os.getpid(), "started_at": time.time()}).encode()
+    payload = json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "started_at": time.time()}).encode()
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
@@ -568,7 +633,7 @@ def acquire_lock(target: str, force: bool = False) -> Lock:
             try:
                 with open(path, encoding="utf-8") as f:
                     info = json.load(f)
-                stale = (time.time() - info.get("started_at", 0)) > LOCK_STALE_S
+                stale = _lock_is_stale(info)
             except (OSError, ValueError):
                 stale = True
         if not stale:
@@ -635,6 +700,7 @@ async def run_experiment(fault, target: str, container: ContainerRef, th: Thresh
         "error": None, "timeline": [], "during": None,
         "python_version": sys.version.split()[0],
         "events": [], "event_seq": 0,
+        "fleet": fleet.record_metadata(), "profile_impact": None,
     }
     import activity  # local import: activity.py imports this module
     sink_token = _command_sink.set(activity.command_sink(record))
@@ -648,7 +714,21 @@ async def run_experiment(fault, target: str, container: ContainerRef, th: Thresh
                    f"(id {container.id[:12]}), which is running."),
                   container=container.name, container_id=container.id, synthetic=bool(fault.dry_run))
 
-    ids = config.all_car_ids()
+    lockout = None if fault.dry_run else active_lockout()
+    if lockout is not None:
+        # Same rule as scenario.py: while a rollback is unverified, nothing may inject --
+        # including this CLI path and the legacy single-fault API path.
+        record["state"] = STATE_ABORTED
+        record["error"] = (f"RECOVERY REQUIRED lockout is active ({lockout.get('reason')}); refusing to inject. "
+                           f"Resolve it first: python main.py recover")
+        activity.emit(record, "error", record["error"], reason="recovery_lockout")
+        _command_sink.reset(sink_token)
+        record["ended_at_utc"] = utc_now_iso()
+        if on_update is not None:
+            on_update(record)
+        return record
+
+    ids = fleet.current().ids
     try:
         async with httpx.AsyncClient(base_url=config.DITTO_URL,
                                       auth=(config.DITTO_USER, config.DITTO_PASS),
@@ -840,6 +920,7 @@ async def run_experiment(fault, target: str, container: ContainerRef, th: Thresh
 
             fault_rows = [r for r in record["timeline"] if r["phase"] == "fault"]
             record["during"] = probe.summarize(fault_rows) if fault_rows else None
+            record["profile_impact"] = fleet.profile_impact(record["timeline"])
 
     except (KeyboardInterrupt, asyncio.CancelledError) as e:
         record["aborted"] = True
@@ -866,6 +947,8 @@ async def run_experiment(fault, target: str, container: ContainerRef, th: Thresh
         record["injected"] = record["reverted"] = record["rollback_verified"] = False
         record["reverted_at"] = None
 
+    if not fault.dry_run and record.get("rollback_error"):
+        _lock_out_after_failed_rollback(record, fault, target, container)   # before the final event
     outcome = {STATE_COMPLETED: "completed and recovery was verified", STATE_ABORTED: "was aborted",
                STATE_FAILED: "FAILED", STATE_RECOVERY_TIMEOUT: "ended without verified recovery"}.get(
         record["state"], f"ended in state {record['state']}")
@@ -877,6 +960,36 @@ async def run_experiment(fault, target: str, container: ContainerRef, th: Thresh
     if on_update is not None:
         on_update(record)
     return record
+
+
+def active_lockout() -> dict | None:
+    import scenario  # local import: scenario.py imports this module
+    return scenario.read_lockout()
+
+
+def manual_recovery_commands(fault_name: str, container: ContainerRef) -> list[str]:
+    if fault_name == "delay":
+        return [f"docker run --rm --cap-add NET_ADMIN --net container:{container.name} {NETSHOOT_IMAGE} "
+                f"tc qdisc del dev {NETEM_IFACE} root"]
+    return [f"docker start {container.name}"]
+
+
+def _lock_out_after_failed_rollback(record: dict, fault, target: str, container: ContainerRef) -> None:
+    """A legacy single-fault run whose revert could not be verified blocks every further
+    injection, exactly like a scenario does, until an operator resolves it."""
+    import activity
+    import scenario
+    items = [{"experiment_id": record["id"], "action": None, "fault": fault.name, "target": target,
+              "error": record["rollback_error"], "manual": manual_recovery_commands(fault.name, container)}]
+    try:
+        scenario.write_lockout(record["id"], "rollback could not be verified", items)
+    except OSError as e:
+        record["error"] = _join(record["error"], f"could not write the lockout file: {e}")
+        return
+    record["recovery_instructions"] = items
+    activity.emit(record, "error", "RECOVERY REQUIRED: the revert could not be verified, so all further fault "
+                                   "injection is blocked until an operator resolves it (python main.py recover).",
+                  instructions=items)
 
 
 def _interrupt_reason(exc: BaseException) -> str:

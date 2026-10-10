@@ -50,7 +50,7 @@ Digital-twin platforms like Ditto sit in the critical path for fleets of real de
 | Seven agents with a coordinator and persisted run status | implemented; mocked tests; post-run pipeline run live once (on the deterministic fallback) |
 | Knowledge store (SQLite) + deterministic learning that re-ranks candidates | implemented; mocked tests; no trained model, by design |
 | Live stream (SSE) with snapshot, replay, resync; readiness/liveness | implemented; tested; observed live |
-| Redesigned 7-page dashboard | implemented; 73 component tests, production build, and a real-browser smoke test over every page (no console errors) |
+| Redesigned dashboard (8 pages incl. Products & twins) | implemented; 85 component tests, production build, and a real-browser smoke test over every page (no console errors) |
 | Activity log (`events` in every record, incremental API, `ActivityLog` component) and scenario dry run | implemented; mocked tests; a dry run was observed live through the API |
 
 `AUTONOMY_MODE` defaults to `recommend`, where every real fault still needs an explicit operator authorization. The autonomous loop only exists when `AUTONOMY_SANDBOX_ENABLED=true` is set in `.env`; it cannot be enabled from the dashboard. Nothing in any mode auto-applies a remediation.
@@ -129,10 +129,68 @@ This checks the Docker daemon, hits Ditto's real API, checks whether `baseline.j
 ## Run the fleet simulator and capture a baseline
 
 ```bash
-python simulator.py                       # terminal 1: creates/drives NUM_CARS synthetic cars
+python simulator.py                       # terminal 1: creates/drives the configured fleet (default: NUM_CARS cars)
 python main.py baseline --duration 120    # terminal 2: records a REAL baseline.json over 2 minutes
 ```
-A baseline captured over too few samples is statistically weak (documented in `probe.py`'s docstrings) — 120s at the default 2s probe interval gives ~60 samples, enough for a believable p95. `guard.py` also validates a baseline's freshness and health before trusting it (see below).
+A baseline captured over too few samples is statistically weak (documented in `probe.py`'s docstrings) — 120s at the default 2s probe interval gives ~60 samples, enough for a believable p95. `guard.py` also validates a baseline's freshness and health before trusting it (see below). Record a new baseline whenever you change the fleet.
+
+## Multi-product digital twins
+
+The simulator is profile-driven. Each **product profile** (`profiles.py`) defines its Ditto feature schema with units and valid ranges, its device kinds and models, how synthetic telemetry evolves, consistency rules, cross-product health signals, and domain failure modes. **All data is synthetic**: every twin carries `attributes.simulator.synthetic = true` and a notice saying it is not a real-world measurement.
+
+| Profile (alias) | Twin ids | Device kinds | Features | Interval |
+|---|---|---|---|---|
+| `ev` (`car`) | `car-NNN` | passenger EV | battery (level, charging, power, range), location, motion (speed, heading, odometer), thermal, diagnostics | 2 s |
+| `industrial_machine` (`machine`) | `machine-NNN` | motor-pump | motor (temperature, rpm, load, current), vibration (RMS, peak, ISO zone), operation (status, hours, starts), diagnostics (fault codes) | 2 s |
+| `smart_home` (`home`) | `home-NNN` | climate sensor, thermostat, smart light, door/window contact | climate, thermostat (mode, target, HVAC state), lighting (on, brightness, power), contact, device battery | 4 s |
+| `energy_system` (`energy`) | `energy-NNN` | solar + storage site | solar (generation, irradiance), consumption, grid (voltage, current, power, frequency), storage (SoC, power, status) | 5 s |
+| `environmental_sensor` (`environment`) | `envsensor-NNN` | air station | temperature, humidity, air quality (PM2.5/PM10/CO2/AQI per US EPA), connectivity; every reading has `measuredAt` | 5 s |
+| `connected_appliance` (`appliance`) | `appliance-NNN` | washing machine, dishwasher, refrigerator | cycle (status, program, phase, remaining), water temperature / cooling, power + energy meter, error code | 3 s |
+
+**Ditto model.** Each twin is a Thing with a thing definition (`org.dittochaos.sim:<profile>:1.0.0`), identity attributes (`productType`, `category`, `model`, `deviceKind`, `serialNumber`, `simulator.{profile, seed, updateIntervalS, ...}`) and features whose definitions are `org.dittochaos.sim:<profile>-<feature>:1.0.0`. Every update carries a monotonic `seq` and `sentAt` in the profile's heartbeat feature (`battery` for EVs, exactly as before; a `telemetry` feature for the others), so staleness and lost acknowledged updates are measured the same way for every product. Verified against the live Ditto in this repo (`tests/integration/test_live_fleet.py`).
+
+**Configuration** (validated; every problem is reported at once; `python main.py fleet` prints and checks it):
+
+```bash
+# unset -> the original car-only workflow: NUM_CARS EVs car-001.., every SEND_INTERVAL_S
+SIM_FLEET=ev:100                                   # 100 electric vehicles
+SIM_FLEET=machine:50                               # 50 industrial machines
+SIM_FLEET=ev:30,machine:20,home:50                 # mixed fleet
+SIM_SEED=7                                         # reproducible values (per twin, independent of order)
+SIM_INTERVALS=home:6,machine:3                     # per-profile update interval (s)
+SIM_PROFILE_PARAMS='{"machine": {"rated_rpm": 2950}, "ev": {"battery_capacity_kwh": 60}}'
+SIM_MAX_TWINS=150                                  # hard ceiling 200 (one search page)
+SIM_CONFIG_FILE=fleet.json                         # or a typed JSON file, which wins over the above:
+```
+```json
+{"fleet": {"ev": 30, "machine": {"count": 20, "interval_s": 3, "params": {"rated_rpm": 2950}},
+           "home": {"count": 50, "id_prefix": "house"}},
+ "seed": 7, "max_twins": 120, "fleet_tag": "lab-1"}
+```
+Limits: at most 200 twins, at most 100 updates/s in total, each interval between 0.5 s and MAX_STALE_S/2 (so a healthy fleet never trips the staleness kill switch), unique id prefixes. Put the same settings in `.env` so the simulator, probe and API agree; the dashboard warns when the simulator runs a different fleet than the API.
+
+**Sizing (measured).** Simulator + probe against the compose stack in this repo (things service limited to 512 MiB; Docker Desktop VM with 12 CPUs / 8 GB), 60 s after a 30 s warm-up, 0% probe errors and 100% fresh twins at every level:
+
+| Fleet | things CPU | gateway CPU | direct read p50 / p95 | staleness p95 |
+|---|---|---|---|---|
+| 30 twins, 3 products | 31% | 16% | 31 / 49 ms | 3.6 s |
+| 60 twins, 3 products | 61% | 39% | 52 / 81 ms | 3.7 s |
+| 100 EVs | 84% | 68% | 103 / 193 ms | 2.1 s |
+| 120 twins, all 6 products | 92% | 57% | 110 / 166 ms | 4.2 s |
+
+120 mixed twins is the largest size validated; the configured ceiling of 200 was not load-tested. An earlier probe version read every attribute and feature of every twin on every tick and saturated the things service at ~100 twins; the per-tick read is now heartbeat-only (see below). Reproduce with the benchmark command in "Running tests".
+
+**Monitoring** separates two things:
+- *System health* (unchanged; the kill switch reads only these): direct-read and search availability and latency, error rate, staleness p95, lost acknowledged updates, search drift. The per-tick direct read fetches only `seq`/`sentAt`, the same small read the car-only probe made.
+- *Product data quality*, per profile, in `row["profiles"]`: twins observed/missing, fresh vs stale against that profile's own limit (3 intervals + 1 probe interval), staleness p95, lost updates, search drift, valid ratio (schema, range, identity and consistency rules — e.g. a charging EV reports zero speed, a stopped machine has zero rpm, grid power = load − solar + storage, AQI matches PM2.5), operational states (charging, fault, door open, …) and cross-product signals (battery %, temperature, humidity, power). A signal a product does not have is reported as **not applicable**, never 0; data that could not be read is **not measured**, never healthy. The full schema check reads every attribute and feature, so it runs every `PROBE_QUALITY_EVERY` ticks (default 5) as a separate request outside the latency the kill switch uses.
+
+**Experiments on mixed fleets.** Faults still target only allowlisted services. A scenario may set `observe_profiles` (validated against the fleet) to say which categories to watch; it never narrows the measurement: every record stores `fleet` (profiles, counts, intervals, signature) and `profile_impact` with each profile's before/fault/recovery windows, status (`affected`, `no_measured_impact`, `not_measured`), symptoms, whether it recovered, and which symptoms every profile shared (service-level) versus only some (product-specific). Records from the car-only version have no such block and are labelled as car-only, not as unaffected.
+
+**Agents.** Risk reports which profiles sit on each service's data path (documented, labelled not measured) and which were affected in stored runs; the fault-injection proposal observes every enabled profile; Recovery reports per-profile recovery; Insights adds product findings built only from that profile's measured numbers; Learning separates product-specific from system-wide symptoms across runs; Remediation attaches product context and domain failure modes (labelled as domain knowledge).
+
+**API.** `GET /api/fleet` (configuration, registry, newest per-profile block, simulator acknowledgements), `GET /api/fleet/twins?profile=&kind=&status=&q=` (per-twin identity and status), `GET /api/fleet/twins/{id}` (one planned twin read live from Ditto and validated), `GET /api/experiments?profile=&service=&twin=`, `observe_profiles` on scenarios; `/api/health` adds `num_twins` and `fleet` (`num_cars` still counts EVs). Dashboard: **Products & twins** page, a per-category section on Live monitoring and Overview, filters on History, and an **Impact by product category** table on every experiment.
+
+**Adding a product.** Subclass `profiles.Profile` in `profiles.py` (or your own module imported at startup): set `key`, `title`, `product_type`, `id_prefix`, `default_interval_s`, `features` (with `Prop` ranges), `kinds`, `models`, `signals`, `failure_modes`, `rules`, a `Params` model, and implement `init_state`, `step`, `render`, `operational_state`; then `register(MyProfile(), aliases=("short",))`. `register()` checks the definition is self-consistent. Simulator, probe, API, agents and dashboard pick it up without changes; `tests/test_fleet.py` runs every registered profile through its own validators.
 
 ## See current health
 
@@ -226,7 +284,7 @@ After you have applied a remediation yourself, open the recommendation (on the e
 
 The link between the original experiment, the recommendation, the follow-up run, who confirmed the change and the result is stored in the knowledge store (`GET /api/followups`) and in the follow-up's own record. API: `GET /api/experiments/{id}/rerun-plan?recommendation_index=N`, `POST /api/experiments/{id}/rerun`.
 
-An expired or missing-timestamp `baseline.json` no longer stops an experiment: the run warns in its activity log and measures a fresh baseline over 30 s instead. It is still refused if Ditto is not healthy during that measurement. The Overview page marks the baseline `expired`. (The autonomous sandbox loop still requires a valid baseline file.)
+An expired baseline no longer stops a **dry run**: it warns that a real run would be refused and continues with a freshly measured baseline. The Overview page marks the baseline `expired` when real runs would be refused.
 
 ## Deploy (single process, single port)
 
@@ -294,23 +352,31 @@ See `guard.py`'s `run_experiment()` docstring for the authoritative field list. 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q
 ```
-Last run (2026-10-10): **454 passed, 10 skipped**, no warnings, in ~22 s. Docker, Ditto and the AI provider are mocked; the 10 skipped tests are the real-Docker suite below. The suite covers the v1 code (`guard.py`, `probe.py`, planner, orchestrator, API) plus v2: fault registry, scenario engine (partial failure, emergency stop, cancellation, lockout, journal replay), agents and coordinator, learning and store, controller/autonomous loop, event bus and monitor, and the HTTP contract.
+Last run (2026-10-11): **546 passed, 11 skipped** (557 collected). Docker, Ditto and the AI provider are mocked; the 11 skipped tests are the opt-in real-Docker and live-Ditto suites below. `tests/test_audit_safety.py` holds the regressions from the system audit (dry run of every fault, cross-site/DNS-rebinding refusal, shell-safe settings, lockout on every injection path, stale locks of crashed processes). The suite covers the v1 code (`guard.py`, `probe.py`, planner, orchestrator, API) plus v2: fault registry, scenario engine (partial failure, emergency stop, cancellation, lockout, journal replay), agents and coordinator, learning and store, controller/autonomous loop, event bus and monitor, and the HTTP contract.
 
 Real Docker (opt-in; uses one throwaway `alpine` container, never the Ditto services):
 ```powershell
 docker pull alpine:3.20; docker pull nicolaka/netshoot
-$env:DITTO_CHAOS_REAL_DOCKER = "1"; .venv\Scripts\python.exe -m pytest tests/integration -q
+$env:DITTO_CHAOS_REAL_DOCKER = "1"; $env:DITTO_CHAOS_LIVE_DITTO = "1"; .venv\Scripts\python.exe -m pytest tests/integration -q
 ```
-Last run: **10 passed** (all nine fault types: apply, inspect, rollback, verify).
+Last run: **11 passed** -- 10 real-Docker (all nine fault types: apply, inspect, rollback, verify) and 1 live-Ditto (one twin of every device kind of every product profile created, updated, read back, searched and probed in a private namespace, then deleted).
+
+End-to-end chaos matrix (REAL faults against the local Ditto sandbox; needs simulator, probe and a fresh baseline running):
+```powershell
+.venv\Scripts\python.exe scripts\chaos_matrix.py      # writes reports\chaos_matrix_<time>.json
+```
+It runs its own API server on port 8002 and covers: a dry run, rejected requests (unknown target, out-of-range parameter, missing authorization, cross-site origin), one real run of each of the nine faults (each confirmed independently with read-only Docker queries while active, then checked clean after rollback), a two-fault scenario, an emergency stop with a concurrent request, an unhealthy target refused at preflight, a hard kill of the API process with a fault active (journal-based recovery on restart) and a repeat run afterwards. Last run: **16/16 passed**.
+
+Load benchmark (see "Sizing"): `.venv\Scripts\python.exe scripts\bench_fleet.py` (stop your own simulator/probe first).
 
 Frontend:
 ```powershell
 cd frontend
 npm run typecheck   # tsc --noEmit
-npm test            # vitest: 73 tests (stream client, reducer, pages, activity log, candidates, re-run)
+npm test            # vitest: 85 tests (stream client, reducer, pages, activity log, candidates, re-run, fleet)
 npm run build
 ```
-Last run: type check clean, **73 passed** with no warnings, build OK with no warnings.
+Last run: type check clean, **85 passed** with no warnings, build OK with no warnings.
 
 Real browser (headless Chromium via Playwright; needs the backend running and `npx playwright install chromium` once):
 ```powershell

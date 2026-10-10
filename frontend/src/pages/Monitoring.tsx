@@ -1,11 +1,14 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import type { MetricRow } from "../api/types";
 import { MetricChart, faultWindows } from "../components/MetricChart";
-import { Note, PageHeader, Panel, Stat, StateBadge } from "../components/ui";
+import { Empty, Note, PageHeader, Panel, Stat, StateBadge } from "../components/ui";
 import { ago, clock } from "../lib/format";
 import { useLive, useNow } from "../live/LiveContext";
 import { healthLabel } from "../live/stream";
 import { ServicesTable } from "./Overview";
+
+const PALETTE = ["#6b9bd8", "#4fae7b", "#d6a03a", "#b08fd8", "#dc5f58", "#5fb8b0"];
 
 const WINDOWS = [
   { label: "5 min", s: 300 },
@@ -31,6 +34,21 @@ export function Monitoring() {
   const timeouts = rows.filter((r) => r.probe_timeout).length;
   const windows = faultWindows(rows);
   const last = rows.length ? rows[rows.length - 1] : null;
+  const [profile, setProfile] = useState("");
+  const [service, setService] = useState("");
+  const [twin, setTwin] = useState("");
+  const profileTitles = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const r of rows) for (const [k, b] of Object.entries(r.profiles ?? {})) out[k] = b.title;
+    return out;
+  }, [rows]);
+  const profileKeys = Object.keys(profileTitles);
+  const shown = profile && profileKeys.includes(profile) ? [profile] : profileKeys;
+  const block = (r: MetricRow, k: string) => {
+    const b = r.profiles?.[k];
+    return b && b.measured ? b : null;
+  };
+  const limitFor = profile ? last?.profiles?.[profile]?.freshness_limit_s ?? null : null;
 
   return (
     <div className="space-y-4">
@@ -103,8 +121,90 @@ export function Monitoring() {
         </Panel>
       </div>
 
-      <Panel title="Service state and resource usage" meta={live.services?.ts ? `docker stats, queried ${ago(live.services.ts, now)}` : undefined} flush>
-        <ServicesTable />
+      <Panel
+        title="Product data quality"
+        meta="per product category; a data-quality view only -- the kill switch uses the system metrics above"
+        actions={
+          <>
+            <select className="field" aria-label="Product category filter" value={profile} onChange={(e) => setProfile(e.target.value)}>
+              <option value="">all categories</option>
+              {profileKeys.map((k) => (
+                <option key={k} value={k}>
+                  {profileTitles[k]}
+                </option>
+              ))}
+            </select>
+            <form
+              className="flex items-center gap-1.5"
+              onSubmit={(e) => {
+                e.preventDefault();
+              }}
+            >
+              <input className="field w-44" type="search" placeholder="Twin id" aria-label="Find a twin" value={twin} onChange={(e) => setTwin(e.target.value)} />
+              <Link className={`text-xs ${twin.trim() ? "text-accent hover:underline" : "pointer-events-none text-faint"}`} to={`/fleet?twin=${encodeURIComponent(twin.trim())}`}>
+                Open twin
+              </Link>
+            </form>
+          </>
+        }
+      >
+        {!profileKeys.length ? (
+          <Empty>No per-profile data in this window (rows from the car-only probe, or the probe is not running).</Empty>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <div>
+              <h3 className="mb-1 text-xxs uppercase tracking-wider text-faint">Fresh twins (%)</h3>
+              <MetricChart
+                rows={rows}
+                unit="%"
+                series={shown.map((k, i) => ({ key: `fresh-${k}`, label: profileTitles[k], color: PALETTE[i % PALETTE.length], value: (r: MetricRow) => { const b = block(r, k); return b && b.fresh_ratio !== null ? b.fresh_ratio * 100 : null; } }))}
+              />
+            </div>
+            <div>
+              <h3 className="mb-1 text-xxs uppercase tracking-wider text-faint">Staleness p95 (s)</h3>
+              <MetricChart
+                rows={rows}
+                unit=" s"
+                series={shown.map((k, i) => ({ key: `stale-${k}`, label: profileTitles[k], color: PALETTE[i % PALETTE.length], value: (r: MetricRow) => block(r, k)?.stale_p95_s ?? null }))}
+                limit={limitFor !== null ? { value: limitFor, label: "freshness limit" } : null}
+              />
+            </div>
+            <div>
+              <h3 className="mb-1 text-xxs uppercase tracking-wider text-faint">Valid twins (%)</h3>
+              <MetricChart
+                rows={rows}
+                unit="%"
+                series={shown.map((k, i) => ({ key: `valid-${k}`, label: profileTitles[k], color: PALETTE[i % PALETTE.length], value: (r: MetricRow) => { const b = block(r, k); return b && b.valid_ratio !== null ? b.valid_ratio * 100 : null; } }))}
+              />
+            </div>
+            <div>
+              <h3 className="mb-1 text-xxs uppercase tracking-wider text-faint">Lost updates + search drift (twins)</h3>
+              <MetricChart
+                rows={rows}
+                unit=""
+                series={shown.map((k, i) => ({ key: `loss-${k}`, label: profileTitles[k], color: PALETTE[i % PALETTE.length], value: (r: MetricRow) => { const b = block(r, k); return b && b.lost_acked !== null && b.search_drift !== null ? b.lost_acked + b.search_drift : null; } }))}
+              />
+            </div>
+          </div>
+        )}
+      </Panel>
+
+      <Panel
+        title="Service state and resource usage"
+        meta={live.services?.ts ? `docker stats, queried ${ago(live.services.ts, now)}` : undefined}
+        flush
+        actions={
+          <select className="field" aria-label="Service filter" value={service} onChange={(e) => setService(e.target.value)}>
+            <option value="">all services</option>
+            {(live.services?.services ?? []).map((s) => (
+              <option key={s.container} value={s.service}>
+                {s.service}
+              </option>
+            ))}
+          </select>
+        }
+      >
+        <ServicesTable service={service} />
       </Panel>
     </div>
   );

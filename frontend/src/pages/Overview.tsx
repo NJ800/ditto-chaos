@@ -1,10 +1,11 @@
 import { Link } from "react-router-dom";
+import { ProfileHealthTable } from "../components/fleet";
 import { Badge, Empty, KV, Note, PageHeader, Panel, Stat, StateBadge } from "../components/ui";
 import { ago, clock, dateTime, humanize, num, pct } from "../lib/format";
 import { useLive, useNow } from "../live/LiveContext";
 import { healthLabel } from "../live/stream";
 
-export function ServicesTable() {
+export function ServicesTable({ service = "" }: { service?: string }) {
   const { services } = useLive();
   if (!services || services.available === null) return <Empty>Container states have not been queried yet.</Empty>;
   if (!services.available || !services.services)
@@ -24,7 +25,7 @@ export function ServicesTable() {
           </tr>
         </thead>
         <tbody>
-          {services.services.map((s) => (
+          {services.services.filter((s) => !service || s.service === service).map((s) => (
             <tr key={s.container}>
               <td className="td">
                 <span className="text-ink">{s.service}</span>
@@ -48,6 +49,14 @@ export function ServicesTable() {
   );
 }
 
+function fleetLine(h: ReturnType<typeof useLive>["health"]): string {
+  if (!h) return "—";
+  const profiles = h.fleet?.profiles;
+  if (h.num_twins === undefined || h.num_twins === null || !profiles) return `${h.num_cars ?? "—"} simulated vehicles`;
+  const n = Object.keys(profiles).length;
+  return `${h.num_twins} synthetic digital twins in ${n} product categor${n === 1 ? "y" : "ies"}`;
+}
+
 export function Overview() {
   const live = useLive();
   const now = useNow();
@@ -65,7 +74,7 @@ export function Overview() {
 
   return (
     <div className="space-y-4">
-      <PageHeader title="Overview" sub={`Eclipse Ditto at ${h?.ditto_url ?? "—"} · ${h?.num_cars ?? "—"} simulated vehicles`} />
+      <PageHeader title="Overview" sub={`Eclipse Ditto at ${h?.ditto_url ?? "—"} · ${fleetLine(h)}`} />
 
       {!trusted && (
         <Note tone={label === "LOADING" ? "muted" : "warn"} role="status">
@@ -86,6 +95,19 @@ export function Overview() {
           <Stat label="Lost acked updates" value={h?.lost_acked === null || h?.lost_acked === undefined ? "unknown" : h.lost_acked} tone={h?.lost_acked ? "bad" : undefined} sub={h?.lost_acked === null ? "simulator state not readable" : undefined} />
           <Stat label="Search drift" value={h?.search_drift === null || h?.search_drift === undefined ? "unknown" : h.search_drift} />
         </div>
+      </Panel>
+
+      <Panel
+        title="Digital-twin fleet"
+        meta="synthetic twins; product data quality from the newest probe tick"
+        actions={
+          <Link className="text-xs text-accent hover:underline" to="/fleet">
+            Products & twins
+          </Link>
+        }
+        flush
+      >
+        <ProfileHealthTable profiles={live.rows.length ? live.rows[live.rows.length - 1].profiles : null} />
       </Panel>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
@@ -111,7 +133,7 @@ export function Overview() {
             {baseExpired && (
               <div className="mb-2">
                 <Note tone="warn" role="status">
-                  This baseline is older than {Math.round((live.baselineMaxAgeS ?? 0) / 60)} minutes. Experiments still run: each one measures its own fresh baseline over 30 seconds first. Re-record it with `python main.py baseline --duration 120` for a more reliable reference.
+                  This baseline is older than {Math.round((live.baselineMaxAgeS ?? 0) / 60)} minutes, so real experiments are refused until it is re-recorded: run `python main.py baseline --duration 120`. Dry runs still work.
                 </Note>
               </div>
             )}

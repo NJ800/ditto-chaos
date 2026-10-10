@@ -102,6 +102,45 @@ export function Insights() {
               </p>
             </Panel>
 
+            {s.by_profile && (
+              <Panel title="By product category" meta={`${s.by_profile.runs_with_profile_data} evidence run(s) with per-category data; ${s.by_profile.legacy_runs_without_profile_data} car-only run(s) without`} flush>
+                {s.by_profile.profiles.length ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[640px] border-collapse text-xs">
+                      <thead>
+                        <tr>
+                          {["Category", "Measured runs", "Affected", "Not recovered", "Product-specific symptoms", "Affected when targeting"].map((h) => (
+                            <th key={h} className="th">
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {s.by_profile.profiles.map((p) => (
+                          <tr key={p.profile}>
+                            <td className="td num text-ink">{p.profile}</td>
+                            <td className="td num">
+                              {p.runs_measured}/{p.runs_observed}
+                            </td>
+                            <td className="td num">{p.runs_affected}</td>
+                            <td className={`td num ${p.runs_not_recovered ? "text-bad" : ""}`}>{p.runs_not_recovered}</td>
+                            <td className="td text-dim">{Object.keys(p.product_specific_symptoms).length ? Object.entries(p.product_specific_symptoms).map(([k, n]) => `${humanize(k)} x${n}`).join(", ") : "none"}</td>
+                            <td className="td text-dim">{Object.keys(p.affected_by_targets).length ? Object.entries(p.affected_by_targets).map(([k, n]) => `${k} x${n}`).join(", ") : "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <p className="border-t border-line px-3 py-2 text-xxs text-faint">
+                      System-wide (shared by every measured category in a run): {Object.keys(s.by_profile.system_wide_symptoms).length ? Object.entries(s.by_profile.system_wide_symptoms).map(([k, n]) => `${humanize(k)} x${n}`).join(", ") : "none"}. {s.by_profile.note}.
+                    </p>
+                  </div>
+                ) : (
+                  <Empty>No evidence run has per-category measurements yet.</Empty>
+                )}
+              </Panel>
+            )}
+
             <Panel title="Repeated patterns" meta="per scenario, evidence runs only" flush>
               {s.patterns.length ? (
                 <div className="overflow-x-auto">

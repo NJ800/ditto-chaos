@@ -25,7 +25,9 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Literal
+from urllib.parse import urlsplit
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -36,10 +38,12 @@ import agents
 import config
 import dependency_mapper
 import faults
+import fleet
 import guard
 import learning
 import orchestrator as orch
 import probe
+import profiles
 import remediation_planner
 import resilience_agent
 import scenario
@@ -107,6 +111,36 @@ async def _require_token(request: Request, call_next):
 # CORS headers and the dashboard can show "not authorized" instead of an opaque network error.
 app.add_middleware(CORSMiddleware, allow_origins=config.FRONTEND_ORIGINS,
                    allow_methods=["GET", "POST"], allow_headers=["Content-Type", "X-API-Token", "X-Operator"])
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def browser_origin_allowed(origin: str, host: str) -> bool:
+    """CSRF / DNS-rebinding guard for state-changing requests sent by a browser.
+
+    Without API_TOKEN the API's only protection is being bound to loopback -- which any web
+    page open in the operator's browser can reach. Browsers always send `Origin` on a
+    cross-origin or same-origin POST, so a POST carrying one is accepted only from a
+    configured dashboard origin (FRONTEND_ORIGINS) or from the API's own origin on a
+    loopback host (or the configured API_HOST). A rebound hostname
+    (evil.example -> 127.0.0.1) is same-origin to itself but not a loopback name, so it is
+    refused too. Requests without `Origin` (CLI, curl, scripts) are not browser requests."""
+    if origin in config.FRONTEND_ORIGINS:
+        return True
+    parts = urlsplit(origin)
+    if not parts.scheme or parts.netloc.lower() != host.lower():
+        return False
+    return (parts.hostname or "") in _LOOPBACK_HOSTS | {config.API_HOST}
+
+
+@app.middleware("http")
+async def refuse_cross_site_mutations(request: Request, call_next):
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if origin is not None and not browser_origin_allowed(origin, request.headers.get("host", "")):
+            return _error(403, f"cross-site request refused: origin {origin[:80]!r} is not an allowed dashboard "
+                               f"origin (FRONTEND_ORIGINS) or this API's own loopback origin", "forbidden_origin")
+    return await call_next(request)
 
 
 def _error(status: int, detail: str, code: str, **extra) -> JSONResponse:
@@ -177,8 +211,136 @@ def readyz():
 # ---------------------------------------------------------------- health / metrics / baseline
 @app.get("/api/health", tags=["monitoring"])
 def get_health(window_s: float = 10):
-    return {**probe.current_health(window_s=window_s), "num_cars": config.NUM_CARS,
+    return {**probe.current_health(window_s=window_s), **fleet.health_fields(),
             "ditto_url": config.DITTO_URL}
+
+
+# ---------------------------------------------------------------- fleet (multi-product twins)
+def _fleet_or_503() -> "fleet.Fleet":
+    try:
+        return fleet.current()
+    except fleet.FleetConfigError as e:
+        raise HTTPException(503, {"message": str(e), "errors": e.errors, "code": "fleet_config"})
+
+
+def _latest_full_row() -> dict | None:
+    rows = read_rows(max(30.0, config.PROBE_INTERVAL_S * 15), max_points=100000, slim=False)
+    return rows[-1] if rows else None
+
+
+@app.get("/api/fleet", tags=["fleet"])
+def get_fleet():
+    """The configured fleet (profiles, counts, intervals, id prefixes, schemas, signals,
+    rules), the newest per-profile data-quality block from probe.py, and the simulator's own
+    acknowledgement stats. Everything here is synthetic simulator data and says so."""
+    fl = _fleet_or_503()
+    now = time.time()
+    row = _latest_full_row()
+    sim = probe.read_sim_state()
+    sim_sig = ((sim or {}).get("fleet") or {}).get("signature")
+    latest = None
+    if row is not None:
+        age = round(now - row["ts"], 1)
+        latest = {"ts": row["ts"], "age_s": age, "fresh": age <= probe.FRESHNESS_MAX_AGE_S,
+                  "system": {k: row.get(k) for k in ("direct_ok", "direct_ms", "search_ok", "search_ms",
+                                                     "stale_p95_s", "lost_acked", "search_drift")},
+                  "fleet": row.get("fleet"), "profiles": row.get("profiles")}
+    return {**fleet.describe(fl), "latest": latest,
+            "simulator": None if sim is None else {
+                "written_at": sim.get("written_at"),
+                "age_s": round(now - sim["written_at"], 1) if isinstance(sim.get("written_at"), (int, float)) else None,
+                "stats": sim.get("stats"), "stats_by_profile": sim.get("stats_by_profile"),
+                "signature": sim_sig, "signature_match": None if sim_sig is None else sim_sig == fl.signature},
+            "notes": [n for n in (
+                None if latest else "no recent probe data -- is `python probe.py` running?",
+                None if sim else "no simulator state file -- is `python simulator.py` running?",
+                "the simulator is running a different fleet configuration than this API"
+                if sim_sig and sim_sig != fl.signature else None) if n]}
+
+
+TWIN_STATUSES = ("fresh", "stale", "invalid", "missing", "unknown")
+
+
+def _twin_status(entry: dict | None) -> str:
+    if not entry:
+        return "unknown"
+    if not entry.get("present"):
+        return "missing"
+    if not entry.get("valid"):
+        return "invalid"
+    return "fresh" if entry.get("fresh") else "stale"
+
+
+@app.get("/api/fleet/twins", tags=["fleet"])
+def get_fleet_twins(profile: str | None = None, kind: str | None = None, status: str | None = None,
+                    q: str | None = Query(None, max_length=120), limit: int = Query(500, ge=1, le=1000)):
+    """Every planned twin with its identity and the newest status probe.py recorded for it.
+    Filter by profile (or alias), device kind, status and a substring of the twin id."""
+    fl = _fleet_or_503()
+    if status is not None and status not in TWIN_STATUSES:
+        raise HTTPException(422, f"status must be one of {', '.join(TWIN_STATUSES)}")
+    key = None
+    if profile:
+        try:
+            key = profiles.get(profile).key
+        except KeyError as e:
+            raise HTTPException(422, str(e).strip("'\""))
+    data = probe.read_twin_status() or {}
+    same = data.get("fleet_signature") == fl.signature
+    entries = data.get("twins") if same and isinstance(data.get("twins"), dict) else {}
+    counts: dict[str, int] = {s: 0 for s in TWIN_STATUSES}
+    items = []
+    for t in fl.twins:
+        e = entries.get(t.id)
+        st = _twin_status(e)
+        if (key and t.profile != key) or (kind and t.kind != kind) or (q and q.lower() not in t.id.lower()):
+            continue
+        counts[st] += 1
+        if status and st != status:
+            continue
+        prof = profiles.REGISTRY[t.profile]
+        items.append({"id": t.id, "profile": t.profile, "category": prof.title, "product_type": prof.product_type,
+                      "kind": t.kind, "model": prof.models[t.kind], "index": t.index, "interval_s": t.interval_s,
+                      "freshness_limit_s": fl.freshness_limit_s(t.profile), "status": st,
+                      "seq": (e or {}).get("seq"), "sent_at": (e or {}).get("sent_at"),
+                      "age_s": (e or {}).get("age_s"), "violations": (e or {}).get("violations") or [],
+                      "missing_features": (e or {}).get("missing_features") or [],
+                      "operational": (e or {}).get("operational")})
+    ts = data.get("ts") if same else None
+    return {"ts": ts, "age_s": round(time.time() - ts, 1) if isinstance(ts, (int, float)) else None,
+            "fleet_signature": fl.signature, "total": len(items), "items": items[:limit], "counts": counts,
+            "note": None if same else ("no per-twin status for this fleet yet -- is `python probe.py` running "
+                                       "with the same fleet configuration?")}
+
+
+@app.get("/api/fleet/twins/{twin_id}", tags=["fleet"])
+def get_fleet_twin(twin_id: str):
+    """One planned twin read live from Ditto and validated against its profile. Only ids in
+    the fleet plan are accepted; this is not a generic Ditto proxy."""
+    fl = _fleet_or_503()
+    spec = fl.by_id().get(twin_id)
+    if spec is None:
+        raise HTTPException(404, f"'{twin_id}' is not a twin of the configured fleet")
+    prof = profiles.REGISTRY[spec.profile]
+    try:
+        r = httpx.get(f"{config.DITTO_URL}/api/2/things/{twin_id}", auth=(config.DITTO_USER, config.DITTO_PASS),
+                      timeout=config.REQUEST_TIMEOUT_S)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Ditto unreachable: {type(e).__name__}")
+    if r.status_code == 404:
+        raise HTTPException(404, f"'{twin_id}' is planned but does not exist in Ditto (is the simulator running?)")
+    if r.status_code != 200:
+        raise HTTPException(502, f"Ditto answered HTTP {r.status_code}")
+    thing = r.json()
+    now = time.time()
+    return {"twin": {"id": spec.id, "profile": spec.profile, "category": prof.title, "kind": spec.kind,
+                     "model": prof.models[spec.kind], "interval_s": spec.interval_s,
+                     "freshness_limit_s": fl.freshness_limit_s(spec.profile),
+                     "heartbeat_feature": prof.heartbeat_feature},
+            "thing": thing, "fetched_at": now,
+            "validation": profiles.validate_twin(prof, spec.kind, thing, None, now),
+            "signals": {s: ({"applicable": True, "value": profiles.View(thing.get("features"))(prof.signal_path(s, spec.kind))}
+                            if prof.signal_path(s, spec.kind) else {"applicable": False}) for s in profiles.SIGNALS}}
 
 
 def _read_metrics_history(window_s: float, max_points: int = 400) -> list[dict]:
@@ -538,9 +700,29 @@ def _experiment_files() -> list[str]:
 
 
 @app.get("/api/experiments", tags=["history"])
-def list_experiments():
+def list_experiments(profile: str | None = None, service: str | None = None,
+                     twin: str | None = Query(None, max_length=120)):
     """Every saved experiment of either schema. A file that cannot be read is listed in
-    `unreadable` (via the X-Unreadable-Count header) instead of crashing the listing."""
+    `unreadable` (via the X-Unreadable-Count header) instead of crashing the listing.
+
+    Filters: `profile` (product profile or alias: experiments whose fleet contained it --
+    car-only records count as 'ev'), `service` (a fault target), `twin` (a twin id of the
+    configured fleet; resolved to its profile, since records hold per-profile, not per-twin,
+    measurements)."""
+    want = None
+    if twin:
+        spec = _fleet_or_503().by_id().get(twin)
+        if spec is None:
+            raise HTTPException(404, f"'{twin}' is not a twin of the configured fleet")
+        want = spec.profile
+    if profile:
+        try:
+            key = profiles.get(profile).key
+        except KeyError as e:
+            raise HTTPException(422, str(e).strip("'\""))
+        if want and key != want:
+            return JSONResponse(content=[], headers={"X-Unreadable-Count": "0"})
+        want = key
     out, bad = [], 0
     for path in _experiment_files():
         try:
@@ -570,7 +752,14 @@ def list_experiments():
             "schema_version": rec.get("schema_version"),
             "validation_verdict": (rec.get("validation") or {}).get("verdict"),
             "recovery_state": rec.get("recovery_state") or agents.recovery_state(rec),
+            "fleet_profiles": case["fleet_profiles"] or (["ev"] if case["legacy_fleet"] else []),
+            "legacy_fleet": case["legacy_fleet"], "affected_profiles": case["affected_profiles"],
+            "observe_profiles": case["observe_profiles"],
         })
+        if want and want not in out[-1]["fleet_profiles"]:
+            out.pop()
+        elif service and service not in out[-1]["targets"]:
+            out.pop()
     return JSONResponse(content=out, headers={"X-Unreadable-Count": str(bad)})
 
 

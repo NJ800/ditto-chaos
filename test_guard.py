@@ -71,9 +71,11 @@ class FakeFault:
 
 
 @pytest.fixture(autouse=True)
-def fast_clock(monkeypatch):
-    """Keep every test fast: tiny probe interval, independent of the real Ditto timeout."""
+def fast_clock(monkeypatch, tmp_path):
+    """Keep every test fast: tiny probe interval, independent of the real Ditto timeout.
+    The recovery lockout file is per-test, so a failed-rollback test never locks the real repo."""
     monkeypatch.setattr(config, "PROBE_INTERVAL_S", 0.01)
+    monkeypatch.setattr(config, "LOCKOUT_FILE", str(tmp_path / "recovery_required.json"))
 
 
 # ================================================================== check_breach / is_healthy

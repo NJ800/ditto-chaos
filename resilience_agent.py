@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 import ai_client
 import config
+import profiles
 
 SCHEMA_VERSION = "1.0"
 REQUIRED_FINDING_KEYS = {"title", "severity", "evidence", "impact", "confidence", "recommended_fix"}
@@ -76,7 +77,85 @@ def extract_evidence(record: dict) -> dict:
         "during_lost_acked_max": during.get("lost_acked_max"),
         "baseline_search_drift_max": baseline.get("search_drift_max"),
         "during_search_drift_max": during.get("search_drift_max"),
+        # Per product profile, from the record's own probe ticks (None for car-only records).
+        "profile_impact": _compact_profile_impact(record.get("profile_impact")),
     }
+
+
+def _compact_profile_impact(impact: dict | None) -> dict | None:
+    if not impact:
+        return None
+    out = {}
+    for key, v in (impact.get("profiles") or {}).items():
+        b, f = v.get("before") or {}, v.get("fault") or {}
+        out[key] = {"title": v.get("title"), "twins": v.get("twins"), "status": v.get("status"),
+                    "symptoms": v.get("symptoms"), "recovered": v.get("recovered"),
+                    "fresh_ratio_before": b.get("fresh_ratio_mean"), "fresh_ratio_during": f.get("fresh_ratio_mean"),
+                    "stale_p95_s_before": b.get("stale_p95_s"), "stale_p95_s_during": f.get("stale_p95_s"),
+                    "valid_ratio_before": b.get("valid_ratio_min"), "valid_ratio_during": f.get("valid_ratio_min"),
+                    "lost_acked_during": f.get("lost_acked_max"), "search_drift_during": f.get("search_drift_max")}
+    return {"profiles": out, "system_wide_symptoms": impact.get("system_wide_symptoms") or []}
+
+
+_PRODUCT_SEVERITY = {"data_loss": "critical", "freshness_loss": "high", "staleness": "medium",
+                     "data_quality": "medium", "search_drift": "low"}
+_PRODUCT_TITLE = {"data_loss": "lost acknowledged updates", "freshness_loss": "twin freshness dropped",
+                  "staleness": "twin staleness increased", "data_quality": "twin data-quality violations increased",
+                  "search_drift": "search drift increased"}
+
+
+def product_findings(record: dict) -> tuple[list[dict], dict]:
+    """Findings scoped to one product profile, built ONLY from that profile's measured
+    numbers in record["profile_impact"]. A profile without measured impact gets no finding;
+    one whose data could not be read is listed as not measured, never as healthy."""
+    impact = record.get("profile_impact")
+    if not impact:
+        return [], {"available": False,
+                    "reason": "this record has no per-profile measurements (recorded before multi-product "
+                              "support, or no probe tick carried profile data)"}
+    findings = []
+    shared = set(impact.get("system_wide_symptoms") or [])
+    for key, v in (impact.get("profiles") or {}).items():
+        if v.get("status") != "affected":
+            continue
+        b, f = v.get("before") or {}, v.get("fault") or {}
+        symptoms = v.get("symptoms") or []
+        worst = min(symptoms, key=lambda x: list(_PRODUCT_SEVERITY).index(x))
+        if worst == "freshness_loss" and (f.get("fresh_ratio_mean") or 0) >= 0.5:
+            sev = "medium"
+        else:
+            sev = _PRODUCT_SEVERITY[worst]
+        nums = [f"fresh twins {b.get('fresh_ratio_mean')} -> {f.get('fresh_ratio_mean')} (mean ratio)",
+                f"stale p95 {b.get('stale_p95_s')}s -> {f.get('stale_p95_s')}s "
+                f"(limit {f.get('freshness_limit_s') or b.get('freshness_limit_s')}s)",
+                f"valid ratio {b.get('valid_ratio_min')} -> {f.get('valid_ratio_min')} (min)",
+                f"lost acknowledged updates during fault: {f.get('lost_acked_max')}",
+                f"search drift during fault: {f.get('search_drift_max')}"]
+        prof = profiles.REGISTRY.get(key)
+        findings.append({
+            "title": f"{v.get('title') or key}: {_PRODUCT_TITLE[worst]}",
+            "severity": sev, "evidence": "; ".join(nums),
+            "impact": f"{v.get('twins')} {v.get('title') or key} twin(s) showed: {', '.join(symptoms)}"
+                      + (" -- the same symptom(s) appeared in every measured profile, so this looks like a "
+                         "service-level effect rather than a product-specific one" if set(symptoms) <= shared
+                         else " -- not seen in every profile, so it is specific to how this product's twins "
+                              "were affected"),
+            "confidence": "supported_by_measurements",
+            "recommended_fix": "See the remediation plan; domain context for this product: "
+                               + ("; ".join(prof.failure_modes) if prof else "none registered"),
+            "scope": "product", "profile": key,
+            "shared_with_all_profiles": set(symptoms) <= shared,
+            "recovered": v.get("recovered"),
+        })
+    summary = {"available": True, "affected_profiles": impact.get("affected_profiles") or [],
+               "unaffected_profiles": impact.get("unaffected_profiles") or [],
+               "not_measured_profiles": impact.get("not_measured_profiles") or [],
+               "system_wide_symptoms": impact.get("system_wide_symptoms") or [],
+               "observation_scope": impact.get("scope"),
+               "domain_context": {k: {"failure_modes": profiles.REGISTRY[k].failure_modes,
+                                      "basis": "registered domain knowledge, NOT a measurement of this run"}
+                                  for k in (impact.get("affected_profiles") or []) if k in profiles.REGISTRY}}
+    return findings, summary
 
 
 def _validate_findings(findings) -> list[dict] | None:
@@ -97,6 +176,11 @@ def _ai_analysis(evidence: dict, dependency_context: str) -> dict | None:
 experiment against Eclipse Ditto. Use ONLY the measurements given below -- never invent a
 number or a measurement that isn't present. If the evidence doesn't support a claim, mark
 its confidence "insufficient_evidence" rather than guessing.
+
+"profile_impact" (if present) holds per-product-profile measurements of the same run (fresh twin
+ratio, staleness, data validity, lost updates, search drift before vs during the fault). Only
+claim that a product category was affected if its own numbers there show it; a profile with
+status "not_measured" must not be described as healthy or as affected.
 
 REAL EXPERIMENT EVIDENCE (JSON, the complete ground truth -- nothing else exists):
 {json.dumps(evidence, indent=2)}
@@ -268,6 +352,13 @@ def analyze_experiment(record: dict, dependency_map: dict | None = None) -> dict
     ai_result = _ai_analysis(evidence, dep_context) if ai_client.ai_enabled() else None
     body, method = (ai_result, "gemini") if ai_result is not None else (_deterministic_analysis(evidence),
                                                                         "deterministic_fallback")
+    for f in body["findings"]:
+        f.setdefault("scope", "system")
+    extra, product = product_findings(record)
+    if extra:
+        body = {**body, "findings": sorted(body["findings"] + extra, key=lambda f: -_SEVERITY_RANK[f["severity"]]),
+                "severity": max([body["severity"]] + [f["severity"] for f in extra], key=_SEVERITY_RANK.get)}
+    body["product_impact"] = product
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),

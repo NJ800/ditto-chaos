@@ -1,0 +1,500 @@
+[
+ {
+  "case": "healthy dry run (no injection)",
+  "start_http": 200,
+  "state": "COMPLETED",
+  "injected": false,
+  "target_clean": true,
+  "pass": true
+ },
+ {
+  "case": "invalid requests rejected",
+  "http": {
+   "unknown target": 422,
+   "out-of-range parameter": 422,
+   "missing authorization": 400,
+   "cross-site origin": 403
+  },
+  "pass": true
+ },
+ {
+  "case": "kill@things-search",
+  "actions": [
+   {
+    "fault": "kill",
+    "target": "things-search",
+    "params": {}
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "killthings-search": true
+  },
+  "experiment_id": "exp-20261011-033616-78aaca",
+  "state": "COMPLETED",
+  "abort_reason": "search endpoint failed on all of the last 3 ticks",
+  "rollback_verified": true,
+  "recovery_outcome": "recovered",
+  "recovery_s": 27.2,
+  "detected_s": 15.5,
+  "after_clean": true,
+  "during_direct_p95_ms": 52.8,
+  "during_search_error_rate": 1.0,
+  "affected_profiles": [
+   "industrial_machine"
+  ],
+  "saved": true,
+  "event_kinds": [
+   "command",
+   "decision",
+   "health",
+   "info"
+  ],
+  "pass": true
+ },
+ {
+  "case": "stop@things-search",
+  "actions": [
+   {
+    "fault": "stop",
+    "target": "things-search",
+    "params": {
+     "grace_s": 5
+    }
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "stopthings-search": true
+  },
+  "experiment_id": "exp-20261011-033728-21e3c6",
+  "state": "COMPLETED",
+  "abort_reason": "search endpoint failed on all of the last 3 ticks",
+  "rollback_verified": true,
+  "recovery_outcome": "recovered",
+  "recovery_s": 12.12,
+  "detected_s": 17.3,
+  "after_clean": true,
+  "during_direct_p95_ms": 55.9,
+  "during_search_error_rate": 1.0,
+  "affected_profiles": [],
+  "saved": true,
+  "event_kinds": [
+   "command",
+   "decision",
+   "health",
+   "info"
+  ],
+  "pass": true
+ },
+ {
+  "case": "restart@things-search",
+  "actions": [
+   {
+    "fault": "restart",
+    "target": "things-search",
+    "params": {
+     "grace_s": 5
+    }
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "restartthings-search": true
+  },
+  "experiment_id": "exp-20261011-033827-a6a6bc",
+  "state": "COMPLETED",
+  "abort_reason": "search endpoint failed on all of the last 3 ticks",
+  "rollback_verified": true,
+  "recovery_outcome": "recovered",
+  "recovery_s": 2.11,
+  "detected_s": 17.61,
+  "after_clean": true,
+  "during_direct_p95_ms": 49.9,
+  "during_search_error_rate": 1.0,
+  "affected_profiles": [
+   "ev",
+   "industrial_machine"
+  ],
+  "saved": true,
+  "event_kinds": [
+   "command",
+   "decision",
+   "health",
+   "info"
+  ],
+  "pass": true
+ },
+ {
+  "case": "pause@things-search",
+  "actions": [
+   {
+    "fault": "pause",
+    "target": "things-search",
+    "params": {}
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "pausethings-search": true
+  },
+  "experiment_id": "exp-20261011-033916-e0da37",
+  "state": "COMPLETED",
+  "abort_reason": "search endpoint failed on all of the last 3 ticks",
+  "rollback_verified": true,
+  "recovery_outcome": "recovered",
+  "recovery_s": 2.03,
+  "detected_s": 15.23,
+  "after_clean": true,
+  "during_direct_p95_ms": 42.0,
+  "during_search_error_rate": 1.0,
+  "affected_profiles": [
+   "smart_home"
+  ],
+  "saved": true,
+  "event_kinds": [
+   "command",
+   "decision",
+   "health",
+   "info"
+  ],
+  "pass": true
+ },
+ {
+  "case": "delay@mongodb",
+  "actions": [
+   {
+    "fault": "delay",
+    "target": "mongodb",
+    "params": {
+     "delay_ms": 300
+    }
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "delaymongodb": true
+  },
+  "experiment_id": "exp-20261011-034002-045ccc",
+  "state": "COMPLETED",
+  "abort_reason": "read latency > 200ms (3.0x baseline p95) for 3 consecutive ticks",
+  "rollback_verified": true,
+  "recovery_outcome": "recovered",
+  "recovery_s": 2.03,
+  "detected_s": 10.36,
+  "after_clean": true,
+  "during_direct_p95_ms": 342.7,
+  "during_search_error_rate": 0.0,
+  "affected_profiles": [],
+  "saved": true,
+  "event_kinds": [
+   "command",
+   "decision",
+   "health",
+   "info"
+  ],
+  "pass": true
+ },
+ {
+  "case": "jitter@things",
+  "actions": [
+   {
+    "fault": "jitter",
+    "target": "things",
+    "params": {
+     "delay_ms": 200,
+     "jitter_ms": 100
+    }
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "jitterthings": true
+  },
+  "experiment_id": "exp-20261011-034047-bb2df7",
+  "state": "COMPLETED",
+  "abort_reason": "search endpoint failed on all of the last 3 ticks",
+  "rollback_verified": true,
+  "recovery_outcome": "recovered",
+  "recovery_s": 4.02,
+  "detected_s": 16.88,
+  "after_clean": true,
+  "during_direct_p95_ms": 4374.7,
+  "during_search_error_rate": 1.0,
+  "affected_profiles": [],
+  "saved": true,
+  "event_kinds": [
+   "command",
+   "decision",
+   "health",
+   "info"
+  ],
+  "pass": true
+ },
+ {
+  "case": "loss@gateway",
+  "actions": [
+   {
+    "fault": "loss",
+    "target": "gateway",
+    "params": {
+     "loss_pct": 5
+    }
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "lossgateway": true
+  },
+  "experiment_id": "exp-20261011-034141-e0e2da",
+  "state": "COMPLETED",
+  "abort_reason": null,
+  "rollback_verified": true,
+  "recovery_outcome": "recovered",
+  "recovery_s": 2.03,
+  "detected_s": null,
+  "after_clean": true,
+  "during_direct_p95_ms": 1110.5,
+  "during_search_error_rate": 0.0,
+  "affected_profiles": [],
+  "saved": true,
+  "event_kinds": [
+   "command",
+   "decision",
+   "health",
+   "info"
+  ],
+  "pass": true
+ },
+ {
+  "case": "bandwidth@things",
+  "actions": [
+   {
+    "fault": "bandwidth",
+    "target": "things",
+    "params": {
+     "rate_kbit": 1000
+    }
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "bandwidththings": true
+  },
+  "experiment_id": "exp-20261011-034245-c0c29b",
+  "state": "COMPLETED",
+  "abort_reason": "read latency > 200ms (3.0x baseline p95) for 3 consecutive ticks",
+  "rollback_verified": true,
+  "recovery_outcome": "recovered",
+  "recovery_s": 6.06,
+  "detected_s": 16.72,
+  "after_clean": true,
+  "during_direct_p95_ms": 2687.4,
+  "during_search_error_rate": 0.6667,
+  "affected_profiles": [
+   "smart_home"
+  ],
+  "saved": true,
+  "event_kinds": [
+   "command",
+   "decision",
+   "health",
+   "info"
+  ],
+  "pass": true
+ },
+ {
+  "case": "cpu_throttle@things-search",
+  "actions": [
+   {
+    "fault": "cpu_throttle",
+    "target": "things-search",
+    "params": {
+     "cpu_pct": 50
+    }
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "cpu_throttlethings-search": true
+  },
+  "experiment_id": "exp-20261011-034340-802a29",
+  "state": "COMPLETED",
+  "abort_reason": null,
+  "rollback_verified": true,
+  "recovery_outcome": "recovered",
+  "recovery_s": 2.05,
+  "detected_s": null,
+  "after_clean": true,
+  "during_direct_p95_ms": 72.8,
+  "during_search_error_rate": 0.0,
+  "affected_profiles": [],
+  "saved": true,
+  "event_kinds": [
+   "command",
+   "decision",
+   "health",
+   "info"
+  ],
+  "pass": true
+ },
+ {
+  "case": "delay@mongodb + kill@things-search",
+  "actions": [
+   {
+    "fault": "delay",
+    "target": "mongodb",
+    "params": {
+     "delay_ms": 300
+    }
+   },
+   {
+    "fault": "kill",
+    "target": "things-search",
+    "params": {}
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "delaymongodb": true,
+   "killthings-search": true
+  },
+  "experiment_id": "exp-20261011-034443-354ad2",
+  "state": "COMPLETED",
+  "abort_reason": "search endpoint failed on all of the last 3 ticks",
+  "rollback_verified": true,
+  "recovery_outcome": "recovered",
+  "recovery_s": 27.25,
+  "detected_s": 17.77,
+  "after_clean": true,
+  "during_direct_p95_ms": 305.2,
+  "during_search_error_rate": 1.0,
+  "affected_profiles": [
+   "smart_home"
+  ],
+  "saved": true,
+  "event_kinds": [
+   "command",
+   "decision",
+   "health",
+   "info"
+  ],
+  "pass": true
+ },
+ {
+  "case": "emergency stop + concurrent request",
+  "actions": [
+   {
+    "fault": "loss",
+    "target": "gateway",
+    "params": {
+     "loss_pct": 3
+    }
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "lossgateway": true
+  },
+  "crash": {
+   "concurrent_http": 409,
+   "stop_http": 200,
+   "state": "COMPLETED",
+   "abort_reason": "emergency stop (requested by operator)",
+   "rollback_verified": true,
+   "after_clean": true
+  },
+  "pass": true
+ },
+ {
+  "case": "unhealthy target refused at preflight",
+  "start_http": 200,
+  "state": "ABORTED",
+  "injected": false,
+  "error": "container 'docker-connectivity-1' for service 'connectivity' exists but is not running (state=exited). Start it first: docker start docker-connectivity-1",
+  "pass": true
+ },
+ {
+  "case": "API crash mid-fault, recovery on restart",
+  "actions": [
+   {
+    "fault": "pause",
+    "target": "things-search",
+    "params": {}
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "pausethings-search": true
+  },
+  "crash": {
+   "fault_active_after_crash": true,
+   "after_restart_clean": true,
+   "lockout": null,
+   "startup_recovery": {
+    "recovered": [
+     {
+      "experiment_id": "exp-20261011-034704-39b98e",
+      "action": "a1",
+      "fault": "pause",
+      "target": "things-search",
+      "detail": "running=True paused=False"
+     }
+    ],
+    "failed": [],
+    "lockout": null
+   }
+  },
+  "pass": true
+ },
+ {
+  "case": "repeat kill@things-search (state leakage)",
+  "actions": [
+   {
+    "fault": "kill",
+    "target": "things-search",
+    "params": {}
+   }
+  ],
+  "before_clean": true,
+  "start_http": 200,
+  "fault_confirmed_independently": {
+   "killthings-search": true
+  },
+  "experiment_id": "exp-20261011-034754-fba981",
+  "state": "COMPLETED",
+  "abort_reason": "search endpoint failed on all of the last 3 ticks",
+  "rollback_verified": true,
+  "recovery_outcome": "recovered",
+  "recovery_s": 27.25,
+  "detected_s": 15.56,
+  "after_clean": true,
+  "during_direct_p95_ms": 52.4,
+  "during_search_error_rate": 1.0,
+  "affected_profiles": [
+   "ev",
+   "industrial_machine",
+   "smart_home"
+  ],
+  "saved": true,
+  "event_kinds": [
+   "command",
+   "decision",
+   "health",
+   "info"
+  ],
+  "pass": true
+ }
+]

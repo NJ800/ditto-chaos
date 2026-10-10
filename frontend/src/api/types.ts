@@ -16,8 +16,21 @@ export interface HealthSnapshot {
   latest_timestamp: number | null;
   fresh: boolean;
   status: "unknown" | "degraded" | "healthy";
+  /** Number of electric-vehicle twins (its meaning from the car-only version). */
   num_cars: number;
+  /** All simulated twins, every product profile. Absent from older backends. */
+  num_twins?: number | null;
+  fleet?: FleetHealth;
   ditto_url: string;
+}
+
+export interface FleetHealth {
+  signature?: string;
+  profiles?: Record<string, number>;
+  legacy_car_only?: boolean;
+  source?: string;
+  synthetic?: boolean;
+  error?: string;
 }
 
 export interface MetricRow {
@@ -32,6 +45,45 @@ export interface MetricRow {
   phase?: string;
   active_faults?: number;
   probe_timeout?: boolean;
+  /** Product data quality per profile. Absent on rows from the car-only probe. */
+  profiles?: Record<string, ProfileBlock>;
+}
+
+export interface SignalValue {
+  applicable: boolean;
+  n?: number;
+  min?: number | null;
+  max?: number | null;
+  mean?: number | null;
+}
+
+/** One probe tick's data-quality block for one product profile. `measured: false` means the
+ *  direct read failed, so every metric is unknown -- never zero. */
+export interface ProfileBlock {
+  title: string;
+  product_type?: string;
+  twins: number;
+  interval_s?: number;
+  freshness_limit_s: number;
+  measured: boolean;
+  observed: number | null;
+  missing: number | null;
+  fresh: number | null;
+  stale: number | null;
+  fresh_ratio: number | null;
+  stale_p95_s: number | null;
+  stale_max_s?: number | null;
+  latest_sent_at?: number | null;
+  lost_acked: number | null;
+  search_drift: number | null;
+  valid: number | null;
+  invalid: number | null;
+  valid_ratio: number | null;
+  violations?: Record<string, number>;
+  violation_count?: number;
+  missing_features?: number;
+  operational?: Record<string, number>;
+  signals?: Record<string, SignalValue>;
 }
 
 export interface MonitoringStatus {
@@ -139,6 +191,8 @@ export interface Scenario {
   max_duration_s: number;
   pre_s?: number;
   recovery_timeout_s?: number;
+  /** Profiles to watch. Observation only: every profile is still measured and reported. */
+  observe_profiles?: string[] | null;
 }
 
 export interface PolicyIssue {
@@ -188,6 +242,7 @@ export interface ValidationReport {
   limits: Record<string, number>;
   signature: string;
   prediction?: Prediction | null;
+  observe_profiles?: string[] | null;
 }
 
 export interface PreflightResult {
@@ -299,6 +354,59 @@ export interface ExperimentRecord {
   followup_comparison?: FollowupComparison | null;
   recovery_report?: RecoveryReport | null;
   recovery_instructions?: RecoveryInstruction[];
+  /** Fleet the run was measured against. Absent on car-only records. */
+  fleet?: FleetMetadata | null;
+  observe_profiles?: string[] | null;
+  profile_impact?: ProfileImpact | null;
+}
+
+export interface FleetMetadata {
+  signature: string;
+  source: string;
+  legacy_car_only: boolean;
+  total_twins: number;
+  seed: number | null;
+  synthetic: boolean;
+  profiles: Record<string, { title: string; product_type: string; count: number; interval_s: number; id_prefix: string; kinds: string[] }>;
+  error?: string;
+}
+
+export interface ProfileWindow {
+  title: string | null;
+  twins: number | null;
+  samples: number;
+  measured_samples: number;
+  freshness_limit_s: number | null;
+  stale_p95_s: number | null;
+  fresh_ratio_min: number | null;
+  fresh_ratio_mean: number | null;
+  valid_ratio_min: number | null;
+  lost_acked_max: number | null;
+  search_drift_max: number | null;
+  missing_max: number | null;
+}
+
+export interface ProfileImpactRow {
+  title: string | null;
+  twins: number | null;
+  in_scope: boolean;
+  status: "affected" | "no_measured_impact" | "not_measured";
+  symptoms: string[];
+  before: ProfileWindow | null;
+  fault: ProfileWindow | null;
+  recovery: ProfileWindow | null;
+  recovered: boolean | null;
+  notes: string[];
+}
+
+export interface ProfileImpact {
+  profiles: Record<string, ProfileImpactRow>;
+  scope: string[] | null;
+  affected_profiles: string[];
+  unaffected_profiles: string[];
+  not_measured_profiles: string[];
+  system_wide_symptoms: string[];
+  basis: string;
 }
 
 export interface ValidationVerdict {
@@ -332,6 +440,11 @@ export interface Finding {
   recommended_fix: string;
   basis?: "measured" | "hypothesis";
   affected_services?: string[];
+  /** "product" findings concern one profile and come only from its own measurements. */
+  scope?: "system" | "product";
+  profile?: string;
+  affected_profiles?: string[] | null;
+  shared_with_all_profiles?: boolean;
 }
 
 export interface Comparison {
@@ -362,6 +475,18 @@ export interface Analysis {
   limitations?: string[];
   recovery_verified: boolean;
   generated_at_utc: string;
+  product_impact?: ProductImpactSummary;
+}
+
+export interface ProductImpactSummary {
+  available: boolean;
+  reason?: string;
+  affected_profiles?: string[];
+  unaffected_profiles?: string[];
+  not_measured_profiles?: string[];
+  system_wide_symptoms?: string[];
+  observation_scope?: string[] | null;
+  domain_context?: Record<string, { failure_modes: string[]; basis: string }>;
 }
 
 export interface LearningRecord {
@@ -408,6 +533,14 @@ export interface RecommendationItem {
   risks: string;
   verification_steps: string[];
   recurrence: { prior_runs_with_same_finding: number; prior_runs: number };
+  product_context?: {
+    scope: "system" | "product";
+    profiles: string[] | null;
+    title?: string;
+    domain_failure_modes?: string[];
+    shared_with_all_profiles?: boolean | null;
+    basis: string;
+  };
 }
 
 export interface Recommendation {
@@ -492,6 +625,11 @@ export interface ExperimentSummary {
   source: string | null;
   validation_verdict: string | null;
   recovery_state: string;
+  /** Profiles in the fleet when the run happened (car-only records report ["ev"]). */
+  fleet_profiles?: string[];
+  legacy_fleet?: string | null;
+  affected_profiles?: string[];
+  observe_profiles?: string[] | null;
 }
 
 export interface ExperimentDetail {
@@ -616,6 +754,7 @@ export interface LearningView {
     }[];
     model: { trained_model: boolean; method: string; reason: string };
     weights: Record<string, number>;
+    by_profile?: ProfilePatterns;
   };
   ranking: RankedCandidate[];
   records: LearningRecord[];
@@ -807,4 +946,108 @@ export interface Followup {
   status: string;
   completed_at_utc: string | null;
   result: FollowupComparison | null;
+}
+
+// ---------------------------------------------------------------- fleet (multi-product twins)
+export interface ProfileDefinition {
+  key: string;
+  version: string;
+  title: string;
+  product_type: string;
+  default_id_prefix: string;
+  default_interval_s: number;
+  heartbeat_feature: string;
+  thing_definition: string;
+  kinds: Record<string, { model: string; features: string[] }>;
+  features: Record<string, { description: string; definition: string; properties: Record<string, { type: string; unit?: string; min?: number; max?: number; enum?: string[]; description?: string }> }>;
+  signals: Record<string, { applicable: boolean; paths?: Record<string, string> }>;
+  rules: { id: string; description: string; kinds: string[] | null }[];
+  failure_modes: string[];
+  synthetic: boolean;
+}
+
+export interface FleetView extends FleetMetadata {
+  namespace: string;
+  fleet_tag: string;
+  max_twins: number;
+  hard_max_twins: number;
+  signals: Record<string, { label: string; unit: string }>;
+  synthetic_notice: string;
+  registry: Record<string, ProfileDefinition>;
+  enabled: string[];
+  params: Record<string, Record<string, unknown>>;
+  latest: {
+    ts: number;
+    age_s: number;
+    fresh: boolean;
+    system: Record<string, number | boolean | null>;
+    fleet: { signature: string; twins: number; observed: number | null; simulator_signature_match: boolean | null } | null;
+    profiles: Record<string, ProfileBlock> | null;
+  } | null;
+  simulator: {
+    written_at: number | null;
+    age_s: number | null;
+    stats: { sent: number; ok: number; failed: number } | null;
+    stats_by_profile: Record<string, { sent: number; ok: number; failed: number }> | null;
+    signature: string | null;
+    signature_match: boolean | null;
+  } | null;
+  notes: string[];
+}
+
+export type TwinStatus = "fresh" | "stale" | "invalid" | "missing" | "unknown";
+
+export interface TwinRow {
+  id: string;
+  profile: string;
+  category: string;
+  product_type: string;
+  kind: string;
+  model: string;
+  index: number;
+  interval_s: number;
+  freshness_limit_s: number;
+  status: TwinStatus;
+  seq: number | null;
+  sent_at: number | null;
+  age_s: number | null;
+  violations: string[];
+  missing_features: string[];
+  operational: string | null;
+}
+
+export interface TwinList {
+  ts: number | null;
+  age_s: number | null;
+  fleet_signature: string;
+  total: number;
+  items: TwinRow[];
+  counts: Record<TwinStatus, number>;
+  note: string | null;
+}
+
+export interface TwinDetail {
+  twin: { id: string; profile: string; category: string; kind: string; model: string; interval_s: number; freshness_limit_s: number; heartbeat_feature: string };
+  thing: { thingId: string; definition?: string; attributes?: Record<string, unknown>; features?: Record<string, { definition?: string[]; properties?: Record<string, unknown> }> };
+  fetched_at: number;
+  validation: { violations: string[]; missing_features: string[]; unexpected_features: string[]; checks: number; operational: string | null };
+  signals: Record<string, { applicable: boolean; value?: number | null }>;
+}
+
+export interface ProfilePatterns {
+  runs_with_profile_data: number;
+  legacy_runs_without_profile_data: number;
+  system_wide_symptoms: Record<string, number>;
+  profiles: {
+    profile: string;
+    runs_observed: number;
+    runs_measured: number;
+    runs_affected: number;
+    runs_not_recovered: number;
+    symptoms: Record<string, number>;
+    product_specific_symptoms: Record<string, number>;
+    affected_by_targets: Record<string, number>;
+    experiments: string[];
+  }[];
+  note: string;
 }

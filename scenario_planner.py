@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 import ai_client
 import faults
+import fleet
 import guard
 import learning
 import scenario
@@ -175,7 +176,7 @@ def _ai_choice(candidates: list[dict], context: dict) -> dict | None:
 
 def _assemble(chosen: dict, scn: scenario.Scenario, report: dict, ranked: list[dict],
               dependency_map: dict | None, risk: dict | None, method: str, note: str | None,
-              choice: dict | None) -> dict:
+              choice: dict | None, history: list[dict] | None = None) -> dict:
     th = guard.Thresholds.from_env()
     pred = chosen["prediction"]
     targets = report["affected_services"]
@@ -206,7 +207,8 @@ def _assemble(chosen: dict, scn: scenario.Scenario, report: dict, ranked: list[d
             if _text_list(choice.get(k)):
                 body[k] = _text_list(choice.get(k))
         model_risks = _text_list(choice.get("safety_risks"))
-    scn = scn.model_copy(update={"hypothesis": body["hypothesis"][:1000]})
+    observe = _enabled_profiles()
+    scn = scn.model_copy(update={"hypothesis": body["hypothesis"][:1000], "observe_profiles": observe})
     return {
         "schema_version": PROPOSAL_SCHEMA_VERSION,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -226,6 +228,7 @@ def _assemble(chosen: dict, scn: scenario.Scenario, report: dict, ranked: list[d
         "confidence": {"level": pred["confidence"], "basis": pred["basis"],
                        "basis_runs": pred["basis_runs"], "agreement": pred["agreement"]},
         "related_experiments": chosen["related_experiments"],
+        "observation": observation_plan(report["affected_services"], history or [], observe),
         "ranking": {"rank": chosen["rank"], "score": chosen["score"], "components": chosen["components"],
                     "rationale": chosen["rationale"]},
         "alternatives": [{"signature": c["signature"], "score": c["score"], "rank": c["rank"],
@@ -250,7 +253,7 @@ def proposal_for(signature: str, ranked: list[dict], dependency_map: dict | None
         raise PlannerError(f"'{signature}' is refused by policy: "
                            + "; ".join(e["message"] for e in report["errors"]))
     return _assemble(chosen, scn, report, ranked, dependency_map, risk, "operator_selected",
-                     "selected by an operator from the ranked candidate list", None)
+                     "selected by an operator from the ranked candidate list", None, history=history)
 
 
 def propose_scenario(ranked: list[dict], dependency_map: dict | None, health: dict | None,
@@ -305,4 +308,46 @@ def propose_scenario(ranked: list[dict], dependency_map: dict | None, health: di
         if not report["ok"]:   # cannot happen for a ranked candidate; refuse rather than guess
             raise PlannerError("top-ranked candidate failed validation: "
                                + "; ".join(e["message"] for e in report["errors"]))
-    return _assemble(chosen, scn, report, ranked, dependency_map, risk, method, note, choice)
+    return _assemble(chosen, scn, report, ranked, dependency_map, risk, method, note, choice, history=history)
+
+
+# Which product traffic flows through each allowlisted service on THIS simulator's data path
+# (HTTP API via nginx -> gateway). Documented architecture, not a measurement.
+FLEET_DATA_PATH = {
+    "gateway": "every twin read and write (HTTP API) passes through the gateway",
+    "things": "stores and serves every twin's attributes and features",
+    "policies": "authorizes every twin read and write",
+    "mongodb": "persistence behind things, policies and search",
+    "things-search": "only search queries (fleet listings, search drift); direct reads and writes do not use it",
+    "connectivity": "not on this simulator's data path (it serves MQTT/AMQP/Kafka/HTTP-push connections)",
+}
+
+
+def _enabled_profiles() -> list[str] | None:
+    try:
+        return list(fleet.current().prefixes)
+    except fleet.FleetConfigError:
+        return None
+
+
+def observation_plan(targets: list[str], history: list[dict], enabled: list[str] | None) -> dict:
+    """Which product profiles to watch for a fault on `targets`, and what stored evidence
+    says about each of them for these targets. Every enabled profile is observed: a shared
+    service fault is not assumed to stay inside one product category."""
+    exposed = [] if not enabled else [p for p in enabled if any(t != "connectivity" for t in targets)]
+    prior: dict[str, dict] = {}
+    for c in history:
+        if not c.get("evidence") or not c.get("profile_outcomes") or not set(c.get("targets") or []) & set(targets):
+            continue
+        for k, o in c["profile_outcomes"].items():
+            p = prior.setdefault(k, {"runs": 0, "affected": 0, "symptoms": {}})
+            p["runs"] += 1
+            p["affected"] += int(o.get("status") == "affected")
+            for s in o.get("symptoms") or []:
+                p["symptoms"][s] = p["symptoms"].get(s, 0) + 1
+    return {"profiles": enabled, "expected_exposure": exposed,
+            "data_path": {t: FLEET_DATA_PATH.get(t, "unknown") for t in targets},
+            "exposure_basis": "documented Ditto data path for this simulator (not measured)",
+            "prior_evidence_by_profile": prior,
+            "note": "every enabled profile is measured during the run; impact is reported per profile and "
+                    "as a service-level result"}

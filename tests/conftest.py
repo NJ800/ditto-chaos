@@ -201,8 +201,12 @@ def make_probe(rows=(), default=None):
 
 @pytest.fixture(autouse=True)
 def _isolated_state(tmp_path, monkeypatch):
-    """No test under tests/ may write the repository's real knowledge DB, journal or lockout."""
+    """No test under tests/ may write the repository's real knowledge DB, journal or lockout,
+    or depend on the fleet configured in the developer's .env (default: car-only fleet)."""
+    import fleet
     import store
+    monkeypatch.setattr(fleet, "_current", fleet.load(env={}))
+    fleet.reset_quality_cache()
     monkeypatch.setattr(config, "KNOWLEDGE_DB", str(tmp_path / "state" / "k.db"))
     monkeypatch.setattr(config, "JOURNAL_DIR", str(tmp_path / "state" / "journal"))
     monkeypatch.setattr(config, "LOCKOUT_FILE", str(tmp_path / "state" / "recovery_required.json"))

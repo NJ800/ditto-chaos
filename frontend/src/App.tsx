@@ -4,6 +4,7 @@ import { Empty } from "./components/ui";
 import { Agents } from "./pages/Agents";
 import { Control } from "./pages/Control";
 import { Dependencies } from "./pages/Dependencies";
+import { Fleet } from "./pages/Fleet";
 import { ExperimentDetailPage, History } from "./pages/History";
 import { Insights } from "./pages/Insights";
 import { Monitoring } from "./pages/Monitoring";
@@ -26,6 +27,7 @@ export default function App() {
       <Route element={<Layout />}>
         <Route path="/" element={<Overview />} />
         <Route path="/monitoring" element={<Monitoring />} />
+        <Route path="/fleet" element={<Fleet />} />
         <Route path="/control" element={<Control />} />
         <Route path="/experiments" element={<Control />} />
         <Route path="/agents" element={<Agents />} />

@@ -118,6 +118,7 @@ export function Findings({ analysis }: { analysis: Analysis }) {
             <span className="font-medium text-ink">{f.title}</span>
             <StateBadge state={f.severity} />
             <Badge tone={f.basis === "measured" ? "ok" : "warn"}>{f.basis === "measured" ? "measured" : "hypothesis"}</Badge>
+            {f.scope === "product" ? <Badge tone="accent">product: {f.profile}</Badge> : f.scope === "system" ? <Badge>system-level</Badge> : null}
           </div>
           <div className="mt-2">
             <KV
@@ -125,6 +126,7 @@ export function Findings({ analysis }: { analysis: Analysis }) {
                 [f.basis === "measured" ? "Measured evidence" : "Stated evidence", <span className="num">{f.evidence}</span>],
                 ["Impact", f.impact],
                 ["Services", f.affected_services?.join(", ")],
+                ["Product categories", f.scope === "product" ? `${f.profile}${f.shared_with_all_profiles ? " (symptom shared by every measured category: service-level)" : " (specific to this category)"}` : f.affected_profiles?.length ? `measured impact on: ${f.affected_profiles.join(", ")}` : null],
                 ["Confidence", humanize(f.confidence)],
               ]}
             />
@@ -191,6 +193,14 @@ const NEXT: Record<string, { status: string; label: string }[]> = {
   not_effective: [{ status: "accepted", label: "Reopen" }],
 };
 
+function productContext(c: NonNullable<Recommendation["item"]["product_context"]>): string {
+  if (c.scope === "product") {
+    const modes = c.domain_failure_modes?.length ? ` Domain context (not measured): ${c.domain_failure_modes.join("; ")}.` : "";
+    return `${c.title ?? c.profiles?.join(", ")}: ${c.basis}.${modes}`;
+  }
+  return c.profiles?.length ? `System-level; measured impact on ${c.profiles.join(", ")}.` : `System-level. ${c.basis}.`;
+}
+
 function RecRow({ rec, onChanged }: { rec: Recommendation; onChanged: () => void }) {
   const act = useAction((status: string) => api.setRecommendation(rec.experiment_id, rec.index, status), onChanged);
   const [rerun, setRerun] = useState(false);
@@ -227,6 +237,7 @@ function RecRow({ rec, onChanged }: { rec: Recommendation; onChanged: () => void
             [`Analyst note (${it.analyst_suggestion_source ?? "n/a"})`, it.analyst_suggestion],
             ["Expected benefit", it.expected_benefit],
             ["Complexity / risk", `${it.complexity ?? DASH} · ${it.risks ?? DASH}`],
+            ["Product context", it.product_context ? productContext(it.product_context) : null],
             ["Seen before", it.recurrence ? `${it.recurrence.prior_runs_with_same_finding} of ${it.recurrence.prior_runs} earlier run(s) of this scenario` : DASH],
             ["How to verify", <List items={it.verification_steps} />],
             ["Outcome", rec.validation_note ?? (rec.status === "implemented" ? "Waiting for the next run of this scenario." : DASH)],

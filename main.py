@@ -52,10 +52,21 @@ def cmd_doctor(args) -> int:
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f"FAILED ({e})")
 
+    print("[doctor] fleet configuration ...", end=" ")
+    try:
+        import fleet
+        fl = fleet.current()
+        print(f"OK ({len(fl.twins)} twins: "
+              + ", ".join(f"{n} {k}" for k, n in fl.counts().items()) + f"; {fl.source})")
+        probe_id = fl.ids[0]
+    except ValueError as e:   # fleet.FleetConfigError
+        print(f"INVALID -- {e}")
+        probe_id = config.car_id(1)
+
     print(f"[doctor] Ditto at {config.DITTO_URL} ...", end=" ")
     try:
         import httpx
-        r = httpx.get(f"{config.DITTO_URL}/api/2/things", params={"ids": "org.hackathon:car-001"},
+        r = httpx.get(f"{config.DITTO_URL}/api/2/things", params={"ids": probe_id},
                       auth=(config.DITTO_USER, config.DITTO_PASS), timeout=5)
         print(f"HTTP {r.status_code}" + (" OK" if r.status_code == 200 else " (unexpected)"))
     except Exception as e:  # noqa: BLE001 -- doctor must report, never crash, on any failure
@@ -213,6 +224,29 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_fleet(args) -> int:
+    """Validate and print the simulator fleet configuration. Read-only."""
+    import fleet
+    import profiles
+    try:
+        fl = fleet.current()
+    except fleet.FleetConfigError as e:
+        print("[fleet] INVALID configuration:")
+        for err in e.errors:
+            print(f"  - {err}")
+        return 2
+    print(f"[fleet] {len(fl.twins)} synthetic twins, signature {fl.signature}, source {fl.source}"
+          + (" (legacy car-only workflow)" if fl.legacy else ""))
+    for key, n in fl.counts().items():
+        prof = profiles.REGISTRY[key]
+        kinds = sorted({t.kind for t in fl.twins if t.profile == key})
+        ids = [t.id for t in fl.twins if t.profile == key]
+        print(f"  {prof.title:26} {n:4} x every {fl.intervals[key]:g}s  ids {ids[0]} .. {ids[-1]}")
+        print(f"  {'':26} kinds: {', '.join(kinds)}; freshness limit {fl.freshness_limit_s(key):g}s")
+    print(f"[fleet] registered profiles: {', '.join(profiles.REGISTRY)}")
+    return 0
+
+
 def cmd_faults(args) -> int:
     import faults
     for f in faults.catalog():
@@ -278,7 +312,13 @@ def cmd_recover(args) -> int:
 
 
 def cmd_analyze(args) -> int:
-    with open(args.experiment_file, encoding="utf-8") as f:
+    path = args.experiment_file
+    if not os.path.isfile(path):   # also accept a bare id, as `report` prints them
+        path = os.path.join(config.EXPERIMENTS_DIR, f"{os.path.basename(path).removesuffix('.json')}.json")
+    if not os.path.isfile(path):
+        print(f"[analyze] no such experiment: {args.experiment_file} (see `python main.py report`)")
+        return 1
+    with open(path, encoding="utf-8") as f:
         record = json.load(f)
     dep_map = None
     if os.path.isfile("dependency_map.json"):
@@ -314,7 +354,8 @@ def cmd_report(args) -> int:
             continue
         analysis_path = os.path.join(config.REPORTS_DIR, f"experiment_{rec.get('id')}_analysis.json")
         analyzed = "analyzed" if os.path.isfile(analysis_path) else "not yet analyzed"
-        print(f"  {rec.get('id')}: fault={rec.get('fault')} target={rec.get('target')} "
+        dry = " [DRY RUN -- not evidence]" if rec.get("dry_run") else ""
+        print(f"  {rec.get('id')}{dry}: fault={rec.get('fault')} target={rec.get('target')} "
               f"state={rec.get('state')} ({analyzed})")
     latest = os.path.join(config.REPORTS_DIR, "latest_findings.md")
     if os.path.isfile(latest):
@@ -337,7 +378,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--duration", type=float, default=120)
 
     p = sub.add_parser("analyze", help="AI/deterministic findings + remediation plan for one experiment")
-    p.add_argument("experiment_file", help="path to experiments/<id>.json")
+    p.add_argument("experiment_file", help="experiment id, or path to experiments/<id>.json")
 
     sub.add_parser("report", help="list saved experiments and whether they've been analyzed")
 
@@ -351,6 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("serve", help="run the dashboard's backend API (api.py) with uvicorn")
     sub.add_parser("faults", help="list every fault type, its bounds, and whether it is supported")
+    sub.add_parser("fleet", help="validate and print the simulator's product fleet configuration")
     p = sub.add_parser("scenario", help="validate a multi-fault scenario JSON file (never injects)")
     p.add_argument("file")
     p.add_argument("--preflight", action="store_true", help="also check the real containers (read-only)")
@@ -363,7 +405,7 @@ def main() -> int:
     handlers = {"doctor": cmd_doctor, "map": cmd_map, "health": cmd_health,
                "baseline": cmd_baseline, "plan": cmd_plan, "run": cmd_run,
                "analyze": cmd_analyze, "report": cmd_report, "serve": cmd_serve,
-               "faults": cmd_faults, "scenario": cmd_scenario, "recover": cmd_recover}
+               "faults": cmd_faults, "fleet": cmd_fleet, "scenario": cmd_scenario, "recover": cmd_recover}
     return handlers[args.command](args)
 
 

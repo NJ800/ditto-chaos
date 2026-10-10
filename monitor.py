@@ -21,6 +21,7 @@ import time
 
 import config
 import guard
+import fleet
 import probe
 from events import bus
 
@@ -45,9 +46,11 @@ def latest_metrics_file(metrics_dir: str | None = None) -> str | None:
     return os.path.join(metrics_dir, max(files, key=mtime)) if files else None
 
 
-def read_rows(window_s: float, max_points: int = 400, since_ts: float | None = None) -> list[dict]:
+def read_rows(window_s: float, max_points: int = 400, since_ts: float | None = None,
+              slim: bool = True) -> list[dict]:
     """Probe rows from the last `window_s` seconds (optionally only those after since_ts),
-    oldest first, down-sampled to max_points. Malformed lines are skipped, not guessed."""
+    oldest first, down-sampled to max_points. Malformed lines are skipped, not guessed.
+    `slim` drops the bulky per-check detail of the per-profile block (see fleet.slim_row)."""
     path = latest_metrics_file()
     if path is None:
         return []
@@ -73,7 +76,7 @@ def read_rows(window_s: float, max_points: int = 400, since_ts: float | None = N
     if len(rows) > max_points:
         step = len(rows) / max_points
         rows = [rows[int(i * step)] for i in range(max_points)]
-    return rows
+    return [fleet.slim_row(r) for r in rows] if slim else rows
 
 
 def _docker(args: list[str]) -> str:
@@ -156,7 +159,7 @@ class Monitor:
                 "stream": bus.stats()}
 
     def snapshot(self, window_s: float = 600) -> dict:
-        return {"health": {**probe.current_health(), "num_cars": config.NUM_CARS, "ditto_url": config.DITTO_URL},
+        return {"health": {**probe.current_health(), **fleet.health_fields(), "ditto_url": config.DITTO_URL},
                 "monitoring": self.status(), "services": self.services,
                 "rows": read_rows(window_s)}
 
@@ -173,7 +176,7 @@ class Monitor:
             self.last_row_ts = row["ts"]
             bus.publish("metric", {"row": row, "source": "probe"})
         self.last_loop_ts = time.time()
-        health = {**probe.current_health(), "num_cars": config.NUM_CARS, "ditto_url": config.DITTO_URL}
+        health = {**probe.current_health(), **fleet.health_fields(), "ditto_url": config.DITTO_URL}
         bus.publish("health", {"health": health, "monitoring": self.status()})
 
     async def _loop(self) -> None:

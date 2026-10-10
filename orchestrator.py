@@ -33,6 +33,7 @@ import asyncio
 
 import config
 import dependency_mapper
+import fleet
 import guard
 import planner_agent
 import probe
@@ -171,6 +172,9 @@ def _claim(proposal_id: str, dry_run: bool) -> tuple[dict, "asyncio.Event"]:
             raise OrchestratorError("unknown or stale proposal_id -- call generate_plan() again")
         proposal = dict(_state.proposal)
 
+    if not dry_run and scenario.read_lockout() is not None:
+        raise OrchestratorError("a RECOVERY REQUIRED lockout is active: an earlier rollback was not verified. "
+                                "Resolve it first (python main.py recover, or the dashboard banner).")
     target, fault_name = proposal.get("target"), proposal.get("fault")
     if target not in guard.ALLOWLIST:
         raise OrchestratorError(f"target '{target}' is not in guard.py's ALLOWLIST -- refusing")
@@ -477,7 +481,8 @@ def gather_context(policy: dict | None = None) -> dict:
         pending = set()
     return {"dep_map": _load_or_build_dependency_map(), "health": probe.current_health(),
             "baseline": guard.load_baseline(), "history": history, "store_degraded": degraded,
-            "pending_validation": pending, "policy": policy, "outputs": {}}
+            "pending_validation": pending, "policy": policy, "outputs": {},
+            "fleet": fleet.record_metadata()}
 
 
 def _timeline(type_: str, data: dict, experiment_id: str | None = None, proposal_id: str | None = None) -> None:

@@ -37,6 +37,7 @@ import config
 import guard
 import learning
 import probe
+import profiles
 import remediation_planner
 import resilience_agent
 import scenario
@@ -131,8 +132,28 @@ class RiskAgent(Agent):
                             "blast_radius": radius(svc), "calculated_risk": (rated.get(svc) or {}).get("calculated_risk"),
                             "evidence_runs": runs, "undertested": runs == 0}
         limits = [] if dep_map.get("edges") else ["no dependency map is available: blast radius is unknown, not zero"]
+        fl = ctx.get("fleet") or {}
+        enabled = sorted((fl.get("profiles") or {}))
+        if not enabled:
+            limits.append("no fleet description is available: product exposure is unknown")
+        measured: dict[str, dict] = {}
+        for c in ev:
+            for k, o in (c.get("profile_outcomes") or {}).items():
+                if o.get("status") == "affected":
+                    for svc in c.get("targets", []):
+                        measured.setdefault(svc, {}).setdefault(k, 0)
+                        measured[svc][k] += 1
+        for svc, t in targets.items():
+            t["fleet_exposure"] = {
+                "profiles": [] if svc == "connectivity" else enabled,
+                "data_path": scenario_planner.FLEET_DATA_PATH.get(svc, "unknown"),
+                "basis": "documented Ditto data path for this simulator (not measured)",
+                "measured_affected_profiles": measured.get(svc, {}),
+            }
         return {"targets": targets, "undertested": [s for s, t in targets.items() if t["undertested"]],
                 "widest_blast_radius": sorted(targets, key=lambda s: -len(targets[s]["blast_radius"]))[:3],
+                "fleet": {"profiles": fl.get("profiles"), "total_twins": fl.get("total_twins"),
+                          "signature": fl.get("signature")},
                 "limitations": limits}
 
     def summary(self, out: dict) -> str:
@@ -207,6 +228,19 @@ class RecoveryAgent(Agent):
         if not acts and record.get("injected") is not None:   # legacy single-fault record
             report["faults_touched"] = int(bool(record.get("injected")))
             report["faults_verified_removed"] = int(bool(record.get("rollback_verified")))
+        impact = record.get("profile_impact")
+        if impact:
+            prof = {k: {"title": v.get("title"), "status": v.get("status"), "recovered": v.get("recovered"),
+                        "fresh_ratio_after": ((v.get("recovery") or {}).get("fresh_ratio_mean")),
+                        "notes": v.get("notes") or []}
+                    for k, v in (impact.get("profiles") or {}).items()}
+            report["profiles"] = prof
+            report["profiles_not_recovered"] = [k for k, v in prof.items() if v["recovered"] is False]
+            report["profile_recovery_basis"] = ("the last two recovery ticks of each profile: fresh-twin ratio back "
+                                                "within 0.1 of its pre-fault level and no lost updates")
+        else:
+            report["profiles"] = None
+            report["profile_recovery_basis"] = "no per-profile measurements in this record (legacy car-only run)"
         record["recovery_report"] = report
         return report
 
@@ -282,10 +316,13 @@ class InsightsAgent(Agent):
         fault_win = windows.get("fault") or {}
         targets = sorted({a["target"] for a in learning.actions_of(record) if a["target"]})
         effects = learning.observe(record)
+        product = analysis.get("product_impact") or {}
         for i, f in enumerate(analysis["findings"]):
             measured = f.get("confidence") == "supported_by_measurements"
             f.update({"id": f"F{i + 1}", "basis": "measured" if measured else "hypothesis",
                       "affected_services": targets,
+                      "affected_profiles": [f["profile"]] if f.get("scope") == "product"
+                      else product.get("affected_profiles"),
                       "interval": {"from_ts": fault_win.get("from_ts"), "to_ts": fault_win.get("to_ts")}})
         limitations = []
         if not record.get("baseline"):
@@ -298,6 +335,13 @@ class InsightsAgent(Agent):
             limitations.append("post-recovery behaviour was not measured")
         limitations.append("only gateway-level direct-read and search probes are measured; per-service "
                            "internal metrics are not collected, so any root cause below the API is a hypothesis")
+        if not product.get("available"):
+            limitations.append("no per-product-profile measurements exist for this run, so no product category "
+                               "can be said to be affected or unaffected")
+        elif product.get("not_measured_profiles"):
+            limitations.append("twin data could not be read during the fault for: "
+                               + ", ".join(product["not_measured_profiles"])
+                               + " -- their product-level impact is unknown, not zero")
         sig = learning.signature_of(record)
         similar = [{"id": c["id"], "signature": c["signature"], "outcome_class": c["outcome_class"],
                     "symptoms": c["symptoms"], "same_scenario": c["signature"] == sig}
@@ -338,6 +382,7 @@ class LearningAgent(Agent):
             ctx.get("dep_map"), after, (policy or {}).get("allowed_faults"),
             (policy or {}).get("allowed_targets"), policy, store.pending_validation_signatures())
         rec = learning.build_learning_record(record, analysis, before, ranked_before, ranked_after)
+        rec["profiles"] = _profile_learning(case)
         n = sum(1 for c in after if c.get("evidence"))
         rec.update({
             "validation_verdict": (record.get("validation") or {}).get("verdict"),
@@ -356,6 +401,19 @@ class LearningAgent(Agent):
         inf = out["influence"]
         return (f"{'evidence stored' if out['is_evidence'] else 'no evidence'}; score of {inf['signature']} "
                 f"{inf['score_before']} -> {inf['score_after']}")
+
+
+def _profile_learning(case: dict) -> dict:
+    outcomes = case.get("profile_outcomes")
+    if not outcomes:
+        return {"available": False, "reason": case.get("legacy_fleet") or "no per-profile measurements"}
+    shared = set(case.get("system_wide_symptoms") or [])
+    return {"available": True, "system_wide_symptoms": sorted(shared),
+            "product_specific": {k: sorted(set(o.get("symptoms") or []) - shared) for k, o in outcomes.items()
+                                 if set(o.get("symptoms") or []) - shared},
+            "affected_profiles": case.get("affected_profiles") or [],
+            "not_measured_profiles": [k for k, o in outcomes.items() if o.get("status") == "not_measured"],
+            "counts_as_evidence": case.get("evidence")}
 
 
 # ---------------------------------------------------------------- 5. remediation
@@ -397,6 +455,26 @@ REMEDIATION_CATALOG = [
                   "dependency is impaired so they are replayed rather than delayed indefinitely.",
         "benefit": "Stale twins are detected early and catch up after recovery.", "complexity": "medium",
         "risks": "Buffers need a size bound and a drop policy."}),
+    ("freshness", {
+        "title": "Protect telemetry freshness for the affected product category",
+        "change": "Alert on the per-profile fresh-twin ratio, give this category's update path a bounded "
+                  "retry with backoff on the device/gateway side, and replay buffered updates in order once the "
+                  "dependency recovers instead of dropping them.",
+        "benefit": "Twins of this product stay current, or are visibly flagged as stale, during a dependency "
+                   "slowdown.", "complexity": "medium",
+        "risks": "Replaying a large backlog can overload the recovering service; rate-limit replay."}),
+    ("data-quality", {
+        "title": "Validate product telemetry at ingestion",
+        "change": "Apply this profile's schema and consistency rules where updates enter the platform (or in a "
+                  "WoT thing model / validation hook) and reject or quarantine inconsistent updates.",
+        "benefit": "Inconsistent device data is caught at the edge rather than by downstream consumers.",
+        "complexity": "medium", "risks": "Strict validation can reject legitimate edge cases; log rejects."}),
+    ("search drift", {
+        "title": "Monitor and bound search-index lag per product category",
+        "change": "Track search lag per product category and make listing views fall back to direct reads, or "
+                  "show an 'index catching up' notice, while drift is above the tolerance.",
+        "benefit": "Fleet listings stay correct while the search index catches up.", "complexity": "low",
+        "risks": "Fallback reads cost more; limit them to the affected category."}),
     ("no significant degradation", {
         "title": "Increase test strength or add observability",
         "change": "The system tolerated this fault at this intensity. Re-test with a longer duration or higher "
@@ -448,7 +526,11 @@ class RemediationAgent(Agent):
                     f"Verified if the finding '{f.get('title')}' does not recur; marked not effective if it does."],
                 "recurrence": {"prior_runs_with_same_finding": recurrence, "prior_runs": len(prior)},
                 "category": remediation_planner.classify(f), "status": "proposed", "auto_applied": False,
+                "product_context": _product_context(f, analysis),
             })
+            if f.get("scope") == "product":
+                recs[-1]["verification_steps"][-1] += (f" Check the '{f.get('profile')}' row of the per-profile "
+                                                       f"impact table on the follow-up run.")
         order = sorted(recs, key=lambda r: (_SEV.get(r["severity"], 9), -r["recurrence"]["prior_runs_with_same_finding"]))
         for n, r in enumerate(order):
             r["priority"] = n + 1
@@ -461,6 +543,23 @@ class RemediationAgent(Agent):
 
     def summary(self, out: dict) -> str:
         return f"{len(out['recommendations'])} recommendation(s), none applied automatically"
+
+
+def _product_context(finding: dict, analysis: dict) -> dict:
+    """Which product categories a recommendation concerns, and on what basis."""
+    product = analysis.get("product_impact") or {}
+    if finding.get("scope") == "product":
+        key = finding.get("profile")
+        prof = profiles.REGISTRY.get(key)
+        return {"scope": "product", "profiles": [key],
+                "title": prof.title if prof else key,
+                "domain_failure_modes": prof.failure_modes if prof else [],
+                "shared_with_all_profiles": finding.get("shared_with_all_profiles"),
+                "basis": "measured impact on this profile; failure modes are registered domain knowledge"}
+    if not product.get("available"):
+        return {"scope": "system", "profiles": None, "basis": "no per-profile measurements for this run"}
+    return {"scope": "system", "profiles": product.get("affected_profiles") or [],
+            "basis": "system-level finding; profiles listed are those with measured impact in this run"}
 
 
 class AgentSkipped(Exception):

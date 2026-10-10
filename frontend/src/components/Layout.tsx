@@ -10,6 +10,7 @@ import { Badge, Button, ErrorNote, Note, StateBadge } from "./ui";
 const NAV = [
   { to: "/", label: "Overview" },
   { to: "/monitoring", label: "Live monitoring" },
+  { to: "/fleet", label: "Products & twins" },
   { to: "/control", label: "Experiment control" },
   { to: "/agents", label: "Agents" },
   { to: "/history", label: "History" },

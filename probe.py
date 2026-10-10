@@ -1,15 +1,24 @@
 """Health checker: measures how healthy Ditto is, every PROBE_INTERVAL_S seconds.
 
-Per tick it records:
+Per tick it records SYSTEM-LEVEL health (unchanged by multi-product support; the kill
+switch reads only these fields):
   direct_ok / direct_ms  - read all twins via things service
   search_ok / search_ms  - fleet query via things-search service
-  stale_p50/p95/max_s    - seconds since the stored update was sent by the car
-  lost_acked             - cars whose stored seq is OLDER than a seq Ditto already acknowledged
+  stale_p50/p95/max_s    - seconds since the stored update was sent by the twin
+  lost_acked             - twins whose stored seq is OLDER than a seq Ditto already acknowledged
                            (silent data loss; should always be 0)
-  search_drift           - cars missing from search or > SEARCH_DRIFT_TOLERANCE updates behind
+  search_drift           - twins missing from search or > SEARCH_DRIFT_TOLERANCE updates behind
 
-Lines go to metrics/probe-<time>.jsonl. The simulator must run on the same machine
-for lost_acked (it reads state/sent.json); otherwise that field is null.
+and, separately, PRODUCT DATA QUALITY per profile under row["profiles"] (see fleet.py):
+freshness against each profile's own interval, lost updates, search drift, schema and
+consistency validity, operational states, and cross-profile signals that are reported as
+not applicable where a profile has no such feature.
+
+Which twins exist comes from the fleet plan (fleet.py), shared with simulator.py.
+
+Lines go to metrics/probe-<time>.jsonl; the newest per-twin status goes to
+metrics/twins-latest.json. The simulator must run on the same machine for lost_acked
+(it reads state/sent.json); otherwise that field is null.
 
 This module also offers a small, standalone kill-switch API for anything that just
 wants a yes/no safety answer without running its own fault-injection loop:
@@ -34,8 +43,17 @@ import time
 import httpx
 
 import config
+import fleet
+import profiles
 
-FIELDS = "thingId,features/battery/properties"
+TWINS_FILE_NAME = "twins-latest.json"
+# Per-twin status from the most recent probe_once() call in this process.
+last_twin_status: dict = {}
+# The full schema/consistency read (all attributes and features of every twin) costs Ditto
+# far more than the heartbeat read, so it runs on every Nth tick only, as a separate request
+# that is NOT part of the timed system-level direct read.
+QUALITY_EVERY = max(1, int(os.getenv("PROBE_QUALITY_EVERY", "5")))
+_tick = 0
 
 
 def percentile(values: list[float], p: float):
@@ -47,19 +65,40 @@ def percentile(values: list[float], p: float):
 
 
 def read_acked() -> dict | None:
+    """id -> last acknowledged seq from the simulator's state/sent.json (both the
+    multi-product "twins" layout and the car-only "cars" layout are accepted)."""
     try:
         with open(config.SENT_FILE, encoding="utf-8") as f:
-            return {cid: v["acked_seq"] for cid, v in json.load(f)["cars"].items()}
-    except (OSError, ValueError, KeyError):
+            data = json.load(f)
+        entries = data.get("twins") if isinstance(data.get("twins"), dict) else data["cars"]
+        return {cid: v["acked_seq"] for cid, v in entries.items()}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
 
-def seq_by_id(items: list) -> dict:
+def read_sim_state() -> dict | None:
+    try:
+        with open(config.SENT_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def fleet_ids() -> list[str]:
+    return fleet.current().ids
+
+
+def seq_by_id(items: list, fl: "fleet.Fleet | None" = None) -> dict:
+    specs = fl.by_id() if fl else {}
     out = {}
     for t in items:
-        props = t.get("features", {}).get("battery", {}).get("properties", {})
-        if "seq" in props:
-            out[t["thingId"]] = (props["seq"], props.get("sentAt"))
+        if not isinstance(t, dict):
+            continue
+        spec = specs.get(t.get("thingId"))
+        seq, sent = fleet.heartbeat(t, profiles.REGISTRY.get(spec.profile) if spec else None)
+        if seq is not None:
+            out[t["thingId"]] = (seq, sent)
     return out
 
 
@@ -75,13 +114,38 @@ async def timed_get(client, path, params):
         return False, (time.perf_counter() - t0) * 1000, None
 
 
-async def probe_once(client, ids: list[str]) -> dict:
+async def _direct_read(client, ids: list[str], fields: str):
+    """All twins, in chunks of DIRECT_READ_CHUNK ids read concurrently. ok only if every
+    chunk succeeded; latency is the slowest chunk (one chunk for fleets <= 100 twins,
+    i.e. exactly the single request the car-only probe made)."""
+    step = fleet.DIRECT_READ_CHUNK
+    chunks = [ids[i:i + step] for i in range(0, len(ids), step)] or [[]]
+    results = await asyncio.gather(*(timed_get(client, "/api/2/things", {"ids": ",".join(c), "fields": fields})
+                                      for c in chunks))
+    ok = all(r[0] for r in results)
+    ms = max(r[1] for r in results)
+    body = [t for r in results for t in (r[2] if isinstance(r[2], list) else [])] if ok else None
+    return ok, ms, body
+
+
+async def _no_full_read():
+    return None
+
+
+async def probe_once(client, ids: list[str] | None = None) -> dict:
+    global last_twin_status, _tick
+    fl = fleet.current()
+    ids = fl.ids if ids is None else ids
+    quality_tick = _tick % QUALITY_EVERY == 0
+    _tick += 1
     acked = read_acked()  # read BEFORE querying Ditto, so every acked seq must already be stored
-    direct_task = timed_get(client, "/api/2/things", {"ids": ",".join(ids), "fields": FIELDS})
+    direct_task = _direct_read(client, ids, fleet.heartbeat_fields(fl))
     search_task = timed_get(client, "/api/2/search/things",
-                            {"filter": f'like(thingId,"{config.NAMESPACE}:car-*")',
-                             "option": "size(200)", "fields": FIELDS})
-    (d_ok, d_ms, d_body), (s_ok, s_ms, s_body) = await asyncio.gather(direct_task, search_task)
+                            {"filter": fleet.search_filter(fl), "option": "size(200)",
+                             "fields": fleet.search_fields(fl)})
+    full_task = _direct_read(client, ids, "thingId,attributes,features") if quality_tick else _no_full_read()
+    (d_ok, d_ms, d_body), (s_ok, s_ms, s_body), full = await asyncio.gather(direct_task, search_task, full_task)
+    full_body = full[2] if full is not None and full[0] else None
     now = time.time()
 
     row = {"ts": round(now, 3), "direct_ok": d_ok, "direct_ms": round(d_ms, 1),
@@ -89,7 +153,7 @@ async def probe_once(client, ids: list[str]) -> dict:
            "stale_p50_s": None, "stale_p95_s": None, "stale_max_s": None,
            "lost_acked": None, "search_drift": None}
 
-    direct = seq_by_id(d_body) if d_ok and isinstance(d_body, list) else None
+    direct = seq_by_id(d_body, fl) if d_ok and isinstance(d_body, list) else None
     if direct:
         stale = [now - sent for _, sent in direct.values() if sent is not None]
         row["stale_p50_s"] = round(percentile(stale, 50), 2) if stale else None
@@ -98,12 +162,51 @@ async def probe_once(client, ids: list[str]) -> dict:
         if acked is not None:
             row["lost_acked"] = sum(1 for cid, a in acked.items()
                                     if cid in direct and direct[cid][0] < a)
+    search = None
     if direct and s_ok and isinstance(s_body, dict):
-        search = seq_by_id(s_body.get("items", []))
+        search = seq_by_id(s_body.get("items", []), fl)
         row["search_drift"] = sum(1 for cid, (seq, _) in direct.items()
                                   if cid not in search
                                   or seq - search[cid][0] > config.SEARCH_DRIFT_TOLERANCE)
+
+    # Product data quality -- reported alongside, never mixed into, the fields above.
+    profile_block, last_twin_status = fleet.profile_metrics(
+        fl, d_body if d_ok and isinstance(d_body, list) else None,
+        {cid: v[0] for cid, v in search.items()} if search is not None else None,
+        acked, now, ids, full_body)
+    sim = read_sim_state()
+    sim_sig = ((sim or {}).get("fleet") or {}).get("signature")
+    row["fleet"] = {"signature": fl.signature, "twins": len(ids),
+                    "observed": len(d_body) if d_ok and isinstance(d_body, list) else None,
+                    "simulator_signature_match": None if sim_sig is None else sim_sig == fl.signature}
+    row["profiles"] = profile_block
+    row["quality_check"] = full_body is not None
     return row
+
+
+def write_twin_status(status: dict, ts: float) -> None:
+    os.makedirs(config.METRICS_DIR, exist_ok=True)
+    path = os.path.join(config.METRICS_DIR, TWINS_FILE_NAME)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"ts": ts, "fleet_signature": fleet.current().signature, "twins": status}, f)
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05)
+
+
+def read_twin_status() -> dict | None:
+    try:
+        with open(os.path.join(config.METRICS_DIR, TWINS_FILE_NAME), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -336,7 +439,7 @@ def check_breach(health: dict | None, baseline: dict | None = None) -> tuple[boo
 
     lost = _num_or_none(health.get("lost_acked"))
     if lost is not None and lost > 0:
-        return True, f"{lost:g} car(s) have lost acknowledged updates (confirmed silent data loss)"
+        return True, f"{lost:g} twin(s) have lost acknowledged updates (confirmed silent data loss)"
 
     err = _num_or_none(health.get("error_rate"))
     if err is not None and err > config.MAX_ERROR_RATE:
@@ -374,14 +477,16 @@ def check_breach(health: dict | None, baseline: dict | None = None) -> tuple[boo
 async def run(duration: float | None, write_baseline: bool) -> None:
     os.makedirs(config.METRICS_DIR, exist_ok=True)
     out_path = os.path.join(config.METRICS_DIR, f"probe-{time.strftime('%Y%m%d-%H%M%S')}.jsonl")
-    ids = config.all_car_ids()
+    fl = fleet.current()
+    ids = fl.ids
     rows: list[dict] = []
     start_mono = time.monotonic()
     async with httpx.AsyncClient(base_url=config.DITTO_URL,
                                  auth=(config.DITTO_USER, config.DITTO_PASS),
                                  timeout=config.REQUEST_TIMEOUT_S) as client:
       with open(out_path, "a", encoding="utf-8") as out:
-        print(f"[probe] writing {out_path}", flush=True)
+        mix = ", ".join(f"{n} {k}" for k, n in fl.counts().items())
+        print(f"[probe] writing {out_path} (fleet {fl.signature}: {mix})", flush=True)
         try:
             while duration is None or time.monotonic() - start_mono < duration:
                 tick = time.monotonic()
@@ -389,10 +494,16 @@ async def run(duration: float | None, write_baseline: bool) -> None:
                 rows.append(row)
                 out.write(json.dumps(row) + "\n")
                 out.flush()
+                try:
+                    write_twin_status(last_twin_status, row["ts"])
+                except OSError as e:
+                    print(f"[probe] could not write per-twin status: {e}", flush=True)
+                quality = (" ".join(f"{k}:{b['fresh']}/{b['twins']} fresh,{b['invalid']} invalid"
+                                    for k, b in row["profiles"].items()) if row["direct_ok"] else "not measured")
                 print(f"[probe] direct={'OK ' if row['direct_ok'] else 'ERR'} {row['direct_ms']:7.1f}ms | "
                       f"search={'OK ' if row['search_ok'] else 'ERR'} {row['search_ms']:7.1f}ms | "
                       f"stale p95={row['stale_p95_s']}s | lost={row['lost_acked']} | "
-                      f"drift={row['search_drift']}", flush=True)
+                      f"drift={row['search_drift']} | {quality}", flush=True)
                 await asyncio.sleep(max(0.0, config.PROBE_INTERVAL_S - (time.monotonic() - tick)))
         finally:
             if rows:
@@ -402,7 +513,9 @@ async def run(duration: float | None, write_baseline: bool) -> None:
                     with open(config.BASELINE_FILE, "w", encoding="utf-8") as f:
                         json.dump({"recorded_at": time.time(),
                                    "duration_s": round(time.monotonic() - start_mono),
-                                   "num_cars": config.NUM_CARS, **summary}, f, indent=2)
+                                   "num_cars": fl.counts().get("ev", 0),
+                                   "fleet": fleet.record_metadata(fl),
+                                   "profiles": fleet.summarize_profiles(rows), **summary}, f, indent=2)
                     print(f"[probe] baseline written to {config.BASELINE_FILE}", flush=True)
 
 
