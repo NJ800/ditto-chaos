@@ -2,3 +2,4 @@ venv/
 state/
 metrics/
 __pycache__/
+.env
