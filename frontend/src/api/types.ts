@@ -709,7 +709,7 @@ export interface Snapshot {
   services: ServicesView;
   rows: MetricRow[];
   baseline: Baseline | null;
-  /** A real run is refused when baseline.json is older than this. */
+  /** A run measures its own baseline instead of using baseline.json when the file is older than this. */
   baseline_max_age_s?: number;
   thresholds: Thresholds;
   orchestrator: OrchestratorStatus;

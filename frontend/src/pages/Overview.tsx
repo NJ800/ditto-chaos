@@ -133,7 +133,7 @@ export function Overview() {
             {baseExpired && (
               <div className="mb-2">
                 <Note tone="warn" role="status">
-                  This baseline is older than {Math.round((live.baselineMaxAgeS ?? 0) / 60)} minutes, so real experiments are refused until it is re-recorded: run `python main.py baseline --duration 120`. Dry runs still work.
+                  This baseline is older than {Math.round((live.baselineMaxAgeS ?? 0) / 60)} minutes, so experiments do not use it: each run measures its own baseline for 30 seconds before injecting, and is refused if Ditto is not healthy for that window. To record a longer one, run `python main.py baseline --duration 120`.
                 </Note>
               </div>
             )}

@@ -50,6 +50,7 @@ TERMINAL_STATES = {guard.STATE_COMPLETED, guard.STATE_ABORTED, guard.STATE_FAILE
                    guard.STATE_RECOVERY_TIMEOUT, STATE_RECOVERY_REQUIRED}
 
 SCENARIO_LOCK = "_scenario"
+FRESH_BASELINE_MIN_S = 30.0     # a real run that cannot use baseline.json measures its own over this long
 APPLY_TIMEOUT_S = guard.DOCKER_CMD_TIMEOUT_S * 2 + 30
 
 # Cross-target combinations that are allowed to run together, by fault category. This is
@@ -798,14 +799,21 @@ class ScenarioRun:
                 try:
                     guard.validate_baseline(baseline, source, guard.MAX_BASELINE_AGE_S_DEFAULT)
                 except guard.GuardError as e:
-                    if not (self.dry_run and source == "file"):
+                    if source != "file":
                         raise
-                    # A dry run exists to show what would happen, so it says that a real run
-                    # would stop here and carries on with a baseline measured just now.
-                    self._log("warning", f"A REAL run would be refused at this point: {e} The dry run continues "
-                                         f"with a baseline measured from its own pre-check ticks.",
-                              real_run_would_be_refused=True)
-                    rec["real_run_blocker"] = str(e)
+                    # The saved baseline cannot be trusted (usually: expired). Thresholds are
+                    # never taken from it; a baseline is measured now instead, and it has to
+                    # pass the same validation or the run is refused. A dry run keeps its
+                    # short pre-check, a real run measures for FRESH_BASELINE_MIN_S.
+                    extra = 0 if self.dry_run else max(
+                        0, round(FRESH_BASELINE_MIN_S / config.PROBE_INTERVAL_S) - len(pre))
+                    window_s = (len(pre) + extra) * config.PROBE_INTERVAL_S
+                    self._log("warning", f"The saved baseline is not used: {e} Measuring a fresh baseline over "
+                                         f"{window_s:g}s instead; nothing is injected unless Ditto is healthy "
+                                         f"for that whole window.",
+                              baseline_fallback=True)
+                    rec["baseline_fallback"] = str(e)
+                    pre += [await tick("before") for _ in range(extra)]
                     baseline, source = probe.summarize(pre), "fresh"
                     guard.validate_baseline(baseline, source, guard.MAX_BASELINE_AGE_S_DEFAULT)
                 rec["baseline"], rec["baseline_source"] = baseline, source

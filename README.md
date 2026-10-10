@@ -284,7 +284,7 @@ After you have applied a remediation yourself, open the recommendation (on the e
 
 The link between the original experiment, the recommendation, the follow-up run, who confirmed the change and the result is stored in the knowledge store (`GET /api/followups`) and in the follow-up's own record. API: `GET /api/experiments/{id}/rerun-plan?recommendation_index=N`, `POST /api/experiments/{id}/rerun`.
 
-An expired baseline no longer stops a **dry run**: it warns that a real run would be refused and continues with a freshly measured baseline. The Overview page marks the baseline `expired` when real runs would be refused.
+An expired (or otherwise unusable) `baseline.json` does not stop a scenario started from the dashboard or `POST /api/scenarios/run`: the run logs a warning, never takes thresholds from the file, and measures its own baseline first — over 30 s for a real run, over its normal pre-check for a dry run. That measured baseline must pass the same validation (latency present, error rate ≤ 2%), otherwise nothing is injected. The record stores the reason in `baseline_fallback` and `baseline_source: "fresh"`; the Overview page marks the file `expired`. The `guard.py` / `main.py run` CLI and the autonomous-sandbox checks still require a fresh `baseline.json` (or `--fresh-baseline`).
 
 ## Deploy (single process, single port)
 

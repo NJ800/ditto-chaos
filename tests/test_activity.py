@@ -544,19 +544,36 @@ def test_events_api_never_returns_configured_secrets(client, monkeypatch):
     assert "tok-9f8e7d6c5b4a" not in body and "Authorized by alice" in body
 
 
-async def test_dry_run_with_an_expired_baseline_still_previews_and_says_a_real_run_would_be_refused(
+async def test_an_expired_baseline_is_replaced_by_a_fresh_measurement_and_never_sets_thresholds(
         realcmd, monkeypatch, tmp_path):
     sandbox = realcmd       # commands go through the real run_cmd, so previews are recorded
+    stale = tmp_path / "baseline.json"
+    stale.write_text(json.dumps({"recorded_at": time.time() - 3 * 3600, "direct_ms": {"p95": 9999},
+                                 "search_ms": {"p95": 9999}, "direct_error_rate": 0.0, "search_error_rate": 0.0}))
+    monkeypatch.setattr(config, "BASELINE_FILE", str(stale))
+    r, rec = await run(scn(("kill", "things")), authorization=None, dry_run=True)
+    assert rec["state"] == guard.STATE_COMPLETED and rec["baseline_source"] == "fresh"
+    assert "stale" in rec["baseline_fallback"]
+    warn = of(rec, "warning")
+    assert len(warn) == 1 and warn[0]["message"].startswith("The saved baseline is not used")
+    assert of(rec, "command", "INJECTING") and sandbox.calls == []
+    assert len([row for row in rec["timeline"] if row["phase"] == "before"]) == 2      # dry run: pre_s only
+    # a real run measures its own baseline over FRESH_BASELINE_MIN_S and then proceeds
+    r, rec = await run(scn(("kill", "things")))
+    assert rec["state"] != guard.STATE_ABORTED and rec["injected"] is True
+    assert rec["baseline_source"] == "fresh" and "stale" in rec["baseline_fallback"]
+    assert rec["baseline"]["direct_ms"]["p95"] != 9999
+    before = [row for row in rec["timeline"] if row["phase"] == "before"]
+    assert len(before) == round(scenario.FRESH_BASELINE_MIN_S / config.PROBE_INTERVAL_S)
+
+
+async def test_a_real_run_is_still_refused_when_the_fresh_baseline_is_unhealthy(sandbox, monkeypatch, tmp_path):
     stale = tmp_path / "baseline.json"
     stale.write_text(json.dumps({"recorded_at": time.time() - 3 * 3600, "direct_ms": {"p95": 20},
                                  "search_ms": {"p95": 20}, "direct_error_rate": 0.0, "search_error_rate": 0.0}))
     monkeypatch.setattr(config, "BASELINE_FILE", str(stale))
-    r, rec = await run(scn(("kill", "things")), authorization=None, dry_run=True)
-    assert rec["state"] == guard.STATE_COMPLETED and rec["baseline_source"] == "fresh"
-    assert "stale" in rec["real_run_blocker"]
-    warn = of(rec, "warning")
-    assert len(warn) == 1 and warn[0]["message"].startswith("A REAL run would be refused at this point")
-    assert of(rec, "command", "INJECTING") and sandbox.calls == []
-    # the real run is still refused for exactly that reason
+    bad = {**OK_ROW, "direct_ok": False, "direct_ms": None}
+    monkeypatch.setattr(probe, "probe_once", make_probe([OK_ROW, OK_ROW, bad, bad] + [OK_ROW] * 40))
     r, rec = await run(scn(("kill", "things")))
-    assert rec["state"] == guard.STATE_ABORTED and "stale" in rec["error"] and sandbox.mutating_calls() == []
+    assert rec["state"] == guard.STATE_ABORTED and "unhealthy" in rec["error"]
+    assert not rec.get("injected") and sandbox.mutating_calls() == []
