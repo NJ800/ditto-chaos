@@ -111,7 +111,7 @@ export function Overview() {
             {baseExpired && (
               <div className="mb-2">
                 <Note tone="warn" role="status">
-                  This baseline is older than {Math.round((live.baselineMaxAgeS ?? 0) / 60)} minutes, so real experiments are refused until it is re-recorded: run `python main.py baseline --duration 120`. Dry runs still work.
+                  This baseline is older than {Math.round((live.baselineMaxAgeS ?? 0) / 60)} minutes. Experiments still run: each one measures its own fresh baseline over 30 seconds first. Re-record it with `python main.py baseline --duration 120` for a more reliable reference.
                 </Note>
               </div>
             )}

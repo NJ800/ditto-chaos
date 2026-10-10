@@ -226,7 +226,7 @@ After you have applied a remediation yourself, open the recommendation (on the e
 
 The link between the original experiment, the recommendation, the follow-up run, who confirmed the change and the result is stored in the knowledge store (`GET /api/followups`) and in the follow-up's own record. API: `GET /api/experiments/{id}/rerun-plan?recommendation_index=N`, `POST /api/experiments/{id}/rerun`.
 
-An expired baseline no longer stops a **dry run**: it warns that a real run would be refused and continues with a freshly measured baseline. The Overview page marks the baseline `expired` when real runs would be refused.
+An expired or missing-timestamp `baseline.json` no longer stops an experiment: the run warns in its activity log and measures a fresh baseline over 30 s instead. It is still refused if Ditto is not healthy during that measurement. The Overview page marks the baseline `expired`. (The autonomous sandbox loop still requires a valid baseline file.)
 
 ## Deploy (single process, single port)
 

@@ -553,10 +553,16 @@ async def test_dry_run_with_an_expired_baseline_still_previews_and_says_a_real_r
     monkeypatch.setattr(config, "BASELINE_FILE", str(stale))
     r, rec = await run(scn(("kill", "things")), authorization=None, dry_run=True)
     assert rec["state"] == guard.STATE_COMPLETED and rec["baseline_source"] == "fresh"
-    assert "stale" in rec["real_run_blocker"]
+    assert "stale" in rec["baseline_file_problem"]
     warn = of(rec, "warning")
-    assert len(warn) == 1 and warn[0]["message"].startswith("A REAL run would be refused at this point")
+    assert len(warn) == 1 and warn[0]["message"].startswith("baseline.json cannot be used")
     assert of(rec, "command", "INJECTING") and sandbox.calls == []
-    # the real run is still refused for exactly that reason
+    # a real run no longer fails on a stale file: it measures a fresh baseline and proceeds
     r, rec = await run(scn(("kill", "things")))
-    assert rec["state"] == guard.STATE_ABORTED and "stale" in rec["error"] and sandbox.mutating_calls() == []
+    assert rec["state"] == guard.STATE_COMPLETED and rec["baseline_source"] == "fresh" and rec["error"] is None
+    assert len([t for t in rec["timeline"] if t["phase"] == "before"]) == 30 and rec["rollback_verified"]
+    # ...but it still refuses when Ditto is unhealthy while that baseline is measured
+    monkeypatch.setattr(probe, "probe_once", make_probe([OK_ROW] * 10, default={**OK_ROW, "direct_ok": False}))
+    n = len(sandbox.mutating_calls())
+    r, rec = await run(scn(("kill", "things")))
+    assert rec["state"] == guard.STATE_ABORTED and len(sandbox.mutating_calls()) == n

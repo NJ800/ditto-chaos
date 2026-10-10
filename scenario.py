@@ -48,6 +48,7 @@ TERMINAL_STATES = {guard.STATE_COMPLETED, guard.STATE_ABORTED, guard.STATE_FAILE
                    guard.STATE_RECOVERY_TIMEOUT, STATE_RECOVERY_REQUIRED}
 
 SCENARIO_LOCK = "_scenario"
+FRESH_BASELINE_S = 30.0   # window used when baseline.json is stale and a fresh one is measured
 APPLY_TIMEOUT_S = guard.DOCKER_CMD_TIMEOUT_S * 2 + 30
 
 # Cross-target combinations that are allowed to run together, by fault category. This is
@@ -766,14 +767,19 @@ class ScenarioRun:
                 try:
                     guard.validate_baseline(baseline, source, guard.MAX_BASELINE_AGE_S_DEFAULT)
                 except guard.GuardError as e:
-                    if not (self.dry_run and source == "file"):
+                    if source != "file":
                         raise
-                    # A dry run exists to show what would happen, so it says that a real run
-                    # would stop here and carries on with a baseline measured just now.
-                    self._log("warning", f"A REAL run would be refused at this point: {e} The dry run continues "
-                                         f"with a baseline measured from its own pre-check ticks.",
-                              real_run_would_be_refused=True)
-                    rec["real_run_blocker"] = str(e)
+                    # baseline.json is missing a timestamp, expired or unhealthy. Rather than
+                    # stopping, measure a fresh one now over a longer window. If Ditto is not
+                    # healthy during it, validate_baseline() below still refuses the run.
+                    rec["baseline_file_problem"] = str(e)
+                    want = max(len(pre), round(FRESH_BASELINE_S / config.PROBE_INTERVAL_S))
+                    self._log("warning", f"baseline.json cannot be used ({str(e).split('. ')[0]}). Measuring a "
+                                         f"fresh baseline over {FRESH_BASELINE_S:g}s instead.",
+                              baseline_file_problem=str(e))
+                    if not self.dry_run:
+                        while len(pre) < want:
+                            pre.append(await tick("before"))
                     baseline, source = probe.summarize(pre), "fresh"
                     guard.validate_baseline(baseline, source, guard.MAX_BASELINE_AGE_S_DEFAULT)
                 rec["baseline"], rec["baseline_source"] = baseline, source
