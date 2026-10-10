@@ -99,7 +99,7 @@ function LockoutBanner() {
   const force = useAction(() => done(true));
   if (!lockout) return null;
   return (
-    <div role="alert" className="border-b border-bad/60 bg-bad/10 px-4 py-3">
+    <div role="alert" className="border-b-2 border-l-4 border-bad bg-bad/10 px-4 py-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-ink">Recovery required: fault injection is disabled</div>
@@ -146,11 +146,11 @@ export function Layout() {
   const orch = live.orchestrator;
   const active = orch && (orch.status === "running" || orch.status === "analyzing");
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-10 border-b border-line bg-surface">
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2">
+    <div className="flex min-h-screen flex-col bg-bg">
+      <header className="sticky top-0 z-10 border-b border-line bg-surface shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2.5">
           <div className="flex items-center gap-4">
-            <span className="text-sm font-semibold tracking-tight text-ink">ditto-chaos</span>
+            <span className="text-base font-bold tracking-tight text-ink">ditto-chaos</span>
             <span className="flex items-center gap-2 text-xxs text-faint">
               Target <StateBadge state={label} />
             </span>
@@ -175,7 +175,7 @@ export function Layout() {
               to={n.to}
               end={n.to === "/"}
               className={({ isActive }) =>
-                `whitespace-nowrap border-b-2 px-2.5 py-2 text-xs ${isActive ? "border-accent text-ink" : "border-transparent text-dim hover:text-ink"}`
+                `whitespace-nowrap border-b-2 px-3 py-2.5 text-sm transition-colors ${isActive ? "border-accent font-semibold text-accent" : "border-transparent text-dim hover:border-line hover:text-ink"}`
               }
             >
               {n.label}

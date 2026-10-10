@@ -4,17 +4,17 @@ export default {
   theme: {
     extend: {
       colors: {
-        bg: "#0f1012",
-        surface: "#16181b",
-        raised: "#1c1f23",
-        line: "#2a2e33",
-        ink: "#e4e6e8",
-        dim: "#a0a6ad",
-        faint: "#70777f",
-        accent: "#6b9bd8",
-        ok: "#4fae7b",
-        warn: "#d6a03a",
-        bad: "#dc5f58",
+        bg: "#f6f8fb",
+        surface: "#ffffff",
+        raised: "#f1f4f8",
+        line: "#dce3ec",
+        ink: "#172033",
+        dim: "#475569",
+        faint: "#64748b",
+        accent: "#2563eb",
+        ok: "#15803d",
+        warn: "#b45309",
+        bad: "#b91c1c",
       },
       fontFamily: {
         sans: ["Inter", "Segoe UI", "system-ui", "-apple-system", "sans-serif"],

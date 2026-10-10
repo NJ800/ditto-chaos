@@ -56,20 +56,20 @@ export function MetricChart({
     <div style={{ height }} aria-label={`${series.map((s) => s.label).join(", ")} chart`}>
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={data} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
-          <CartesianGrid stroke="#2a2e33" strokeDasharray="2 4" vertical={false} />
-          <XAxis dataKey="ts" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(t) => clock(t as number)} tick={{ fill: "#70777f", fontSize: 10 }} stroke="#2a2e33" minTickGap={60} />
-          <YAxis tick={{ fill: "#70777f", fontSize: 10 }} stroke="#2a2e33" width={44} unit={unit} />
+          <CartesianGrid stroke="#dce3ec" strokeDasharray="2 4" vertical={false} />
+          <XAxis dataKey="ts" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(t) => clock(t as number)} tick={{ fill: "#64748b", fontSize: 10 }} stroke="#dce3ec" minTickGap={60} />
+          <YAxis tick={{ fill: "#64748b", fontSize: 10 }} stroke="#dce3ec" width={44} unit={unit} />
           <Tooltip
             isAnimationActive={false}
-            contentStyle={{ background: "#16181b", border: "1px solid #2a2e33", borderRadius: 4, fontSize: 11 }}
+            contentStyle={{ background: "#ffffff", border: "1px solid #dce3ec", borderRadius: 4, fontSize: 11 }}
             labelFormatter={(t) => clock(t as number)}
             formatter={(v, name) => [v === null || v === undefined ? "no data" : `${Number(v).toFixed(1)}${unit}`, name]}
           />
           {windows.map((w) => (
-            <ReferenceArea key={w.from} x1={w.from} x2={w.to} fill="#dc5f58" fillOpacity={0.12} stroke="#dc5f58" strokeOpacity={0.35} ifOverflow="extendDomain" />
+            <ReferenceArea key={w.from} x1={w.from} x2={w.to} fill="#b91c1c" fillOpacity={0.12} stroke="#b91c1c" strokeOpacity={0.35} ifOverflow="extendDomain" />
           ))}
-          {baseline && <ReferenceLine y={baseline.value} stroke="#70777f" strokeDasharray="4 4" label={{ value: baseline.label, fill: "#70777f", fontSize: 10, position: "insideTopLeft" }} />}
-          {limit && <ReferenceLine y={limit.value} stroke="#d6a03a" strokeDasharray="4 4" label={{ value: limit.label, fill: "#d6a03a", fontSize: 10, position: "insideTopRight" }} />}
+          {baseline && <ReferenceLine y={baseline.value} stroke="#64748b" strokeDasharray="4 4" label={{ value: baseline.label, fill: "#64748b", fontSize: 10, position: "insideTopLeft" }} />}
+          {limit && <ReferenceLine y={limit.value} stroke="#b45309" strokeDasharray="4 4" label={{ value: limit.label, fill: "#b45309", fontSize: 10, position: "insideTopRight" }} />}
           {series.map((s) => (
             <Line key={s.key} dataKey={s.key} name={s.label} stroke={s.color} dot={false} strokeWidth={1.5} isAnimationActive={false} connectNulls={false} />
           ))}

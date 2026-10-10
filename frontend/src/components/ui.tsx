@@ -4,10 +4,12 @@ import { DASH, stateTone, type Tone } from "../lib/format";
 const TONE_TEXT: Record<Tone, string> = { ok: "text-ok", warn: "text-warn", bad: "text-bad", accent: "text-accent", muted: "text-dim" };
 const TONE_DOT: Record<Tone, string> = { ok: "bg-ok", warn: "bg-warn", bad: "bg-bad", accent: "bg-accent", muted: "bg-faint" };
 
+const TONE_FILL: Record<Tone, string> = { ok: "border-ok/25 bg-ok/10", warn: "border-warn/30 bg-warn/10", bad: "border-bad/30 bg-bad/10", accent: "border-accent/25 bg-accent/10", muted: "border-line bg-raised" };
+
 export function Badge({ children, tone }: { children: ReactNode; tone?: Tone }) {
   const t = tone ?? "muted";
   return (
-    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded border border-line bg-raised px-1.5 py-0.5 text-xxs font-medium uppercase tracking-wide ${TONE_TEXT[t]}`}>
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-xxs font-semibold uppercase tracking-wide ${TONE_FILL[t]} ${TONE_TEXT[t]}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${TONE_DOT[t]}`} aria-hidden="true" />
       {children}
     </span>
@@ -21,15 +23,15 @@ export function StateBadge({ state, label }: { state: string | null | undefined;
 
 export function Panel({ title, meta, actions, children, flush }: { title: string; meta?: ReactNode; actions?: ReactNode; children: ReactNode; flush?: boolean }) {
   return (
-    <section className="rounded-md border border-line bg-surface">
-      <header className="flex min-h-[2.5rem] flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-1.5">
+    <section className="overflow-hidden rounded-lg border border-line bg-surface shadow-sm">
+      <header className="flex min-h-[2.75rem] flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2">
         <div className="flex items-baseline gap-2">
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-dim">{title}</h2>
-          {meta && <span className="text-xxs text-faint">{meta}</span>}
+          <h2 className="text-sm font-semibold text-ink">{title}</h2>
+          {meta && <span className="text-xs text-faint">{meta}</span>}
         </div>
         {actions && <div className="flex items-center gap-2">{actions}</div>}
       </header>
-      <div className={flush ? "" : "p-3"}>{children}</div>
+      <div className={flush ? "" : "p-4"}>{children}</div>
     </section>
   );
 }
@@ -37,9 +39,9 @@ export function Panel({ title, meta, actions, children, flush }: { title: string
 export function Stat({ label, value, sub, tone }: { label: string; value: ReactNode; sub?: ReactNode; tone?: Tone }) {
   return (
     <div className="min-w-0 border-l border-line pl-3 first:border-l-0 first:pl-0">
-      <div className="truncate text-xxs uppercase tracking-wider text-faint">{label}</div>
-      <div className={`num mt-0.5 text-lg leading-6 ${tone ? TONE_TEXT[tone] : "text-ink"}`}>{value}</div>
-      {sub && <div className="mt-0.5 truncate text-xxs text-faint">{sub}</div>}
+      <div className="truncate text-xs font-medium text-faint">{label}</div>
+      <div className={`num mt-0.5 text-xl font-semibold leading-7 ${tone ? TONE_TEXT[tone] : "text-ink"}`}>{value}</div>
+      {sub && <div className="mt-0.5 truncate text-xs text-faint">{sub}</div>}
     </div>
   );
 }
@@ -49,17 +51,17 @@ type BtnProps = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "default" 
 export function Button({ variant = "default", busy, disabled, children, className = "", ...rest }: BtnProps) {
   const look =
     variant === "primary"
-      ? "border-accent/60 bg-accent/15 text-ink hover:bg-accent/25"
+      ? "border-accent bg-accent text-white shadow-sm hover:bg-blue-700"
       : variant === "danger"
-        ? "border-bad/60 bg-bad/15 text-ink hover:bg-bad/25"
-        : "border-line bg-raised text-ink hover:border-faint";
+        ? "border-bad bg-bad text-white shadow-sm hover:bg-red-800"
+        : "border-line bg-surface text-ink shadow-sm hover:bg-raised";
   return (
     <button
       type="button"
       {...rest}
       disabled={disabled || busy}
       aria-busy={busy || undefined}
-      className={`inline-flex h-8 items-center justify-center whitespace-nowrap rounded border px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-45 ${look} ${className}`}
+      className={`inline-flex h-8 items-center justify-center whitespace-nowrap rounded-md border px-3 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${look} ${className}`}
     >
       {busy ? "Working…" : children}
     </button>
@@ -67,9 +69,9 @@ export function Button({ variant = "default", busy, disabled, children, classNam
 }
 
 export function Note({ tone = "muted", children, role }: { tone?: Tone; children: ReactNode; role?: "alert" | "status" }) {
-  const border = { ok: "border-ok/40", warn: "border-warn/40", bad: "border-bad/50", accent: "border-accent/40", muted: "border-line" }[tone];
+  const look = { ok: "border-ok/30 bg-ok/5", warn: "border-warn/40 bg-warn/10", bad: "border-bad/40 bg-bad/5", accent: "border-accent/30 bg-accent/5", muted: "border-line bg-raised" }[tone];
   return (
-    <div role={role ?? (tone === "bad" ? "alert" : undefined)} className={`rounded border ${border} bg-raised px-3 py-2 text-xs leading-5 text-dim`}>
+    <div role={role ?? (tone === "bad" ? "alert" : undefined)} className={`rounded-md border ${look} px-3 py-2 text-xs leading-5 text-dim`}>
       {children}
     </div>
   );
@@ -117,8 +119,8 @@ export function PageHeader({ title, sub, actions }: { title: string; sub?: React
   return (
     <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
       <div>
-        <h1 className="text-base font-semibold text-ink">{title}</h1>
-        {sub && <p className="mt-0.5 max-w-3xl text-xs text-faint">{sub}</p>}
+        <h1 className="text-xl font-semibold tracking-tight text-ink">{title}</h1>
+        {sub && <p className="mt-1 max-w-3xl text-sm text-dim">{sub}</p>}
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </div>

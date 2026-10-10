@@ -238,8 +238,8 @@ export function ExperimentDetailPage() {
           rows={rec.timeline ?? []}
           unit=" ms"
           series={[
-            { key: "direct", label: "direct read", color: "#6b9bd8", value: (r) => (r.direct_ok ? r.direct_ms : null) },
-            { key: "search", label: "search", color: "#b08fd8", value: (r) => (r.search_ok ? r.search_ms : null) },
+            { key: "direct", label: "direct read", color: "#2563eb", value: (r) => (r.direct_ok ? r.direct_ms : null) },
+            { key: "search", label: "search", color: "#7c3aed", value: (r) => (r.search_ok ? r.search_ms : null) },
           ]}
           baseline={base.direct_ms?.p95 ? { value: base.direct_ms.p95, label: "baseline p95" } : null}
         />
