@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0",
+  "generated_at_utc": "2026-10-10T08:37:39+00:00",
+  "experiment_id": "exp-20261010-124011-8eba66",
+  "analysis_method": "gemini",
+  "evidence": {
+    "experiment_id": "exp-20261010-124011-8eba66",
+    "fault": "kill",
+    "target": "things-search",
+    "params": {},
+    "state": "FAILED",
+    "aborted": true,
+    "abort_reason": "search endpoint failed on all of the last 3 ticks",
+    "detected_s": 15.42,
+    "reverted": false,
+    "rollback_verified": false,
+    "rollback_error": "container 'docker-things-search-1' now has id 1c951d5ba6fb, not the original 1c951d5ba6fb -- refusing to start what may be a different container. Investigate manually (something else may have recreated it).",
+    "recovery_s": null,
+    "recovery_outcome": null,
+    "baseline_direct_p95_ms": 468.2,
+    "during_direct_p95_ms": 66.1,
+    "direct_p95_delta_ms": -402.1,
+    "direct_p95_pct_change": -85.9,
+    "baseline_search_p95_ms": 402.6,
+    "during_search_p95_ms": null,
+    "search_p95_delta_ms": null,
+    "search_p95_pct_change": null,
+    "baseline_direct_error_rate": 0.0,
+    "during_direct_error_rate": 0.0,
+    "baseline_search_error_rate": 0.0,
+    "during_search_error_rate": 1.0,
+    "baseline_stale_p95_s": 2749.34,
+    "during_stale_p95_s": 2766.69,
+    "baseline_lost_acked_max": 0,
+    "during_lost_acked_max": 0,
+    "baseline_search_drift_max": 0,
+    "during_search_drift_max": null
+  },
+  "summary": "A kill fault on the things-search service caused a total search endpoint outage (100% error rate) and triggered an automated abort, but the recovery failed due to a container ID mismatch during rollback.",
+  "severity": "critical",
+  "root_cause_hypotheses": [
+    {
+      "hypothesis": "The kill fault successfully terminated the things-search service, leading to a complete loss of search functionality.",
+      "supporting_evidence": "during_search_error_rate increased from 0.0 to 1.0; search_p95_ms became null.",
+      "contradicting_evidence": "none",
+      "confidence": "supported_by_measurements",
+      "affected_services": [
+        "things-search"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "title": "Total Search Service Failure",
+      "confidence": "supported_by_measurements",
+      "recommended_fix": "Implement high availability for things-search to prevent single-point-of-failure outages.",
+      "impact": "Users are unable to perform search operations on things.",
+      "severity": "critical",
+      "evidence": "during_search_error_rate: 1.0, abort_reason: 'search endpoint failed on all of the last 3 ticks'"
+    },
+    {
+      "title": "Automated Rollback Failure due to Container ID Conflict",
+      "confidence": "supported_by_measurements",
+      "recommended_fix": "Update the chaos tool to handle container recreation or use labels instead of strict ID matching for rollback.",
+      "impact": "Manual intervention required to restore the environment after a chaos experiment.",
+      "severity": "high",
+      "evidence": "rollback_error: 'container 'docker-things-search-1' now has id 1c951d5ba6fb, not the original 1c951d5ba6fb'"
+    }
+  ],
+  "recovery_verified": false,
+  "recommended_next_experiment": "Test the resilience of the search functionality with multiple replicas of things-search behind a load balancer."
+}

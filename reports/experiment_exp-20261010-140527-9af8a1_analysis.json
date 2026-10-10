@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0",
+  "generated_at_utc": "2026-10-10T09:37:42+00:00",
+  "experiment_id": "exp-20261010-140527-9af8a1",
+  "analysis_method": "deterministic_fallback",
+  "evidence": {
+    "experiment_id": "exp-20261010-140527-9af8a1",
+    "fault": "delay",
+    "target": "mongodb",
+    "params": {
+      "delay_ms": 2000,
+      "ttl_s": 60,
+      "iface": "eth0"
+    },
+    "state": "FAILED",
+    "aborted": false,
+    "abort_reason": null,
+    "detected_s": null,
+    "reverted": false,
+    "rollback_verified": false,
+    "rollback_error": null,
+    "recovery_s": null,
+    "recovery_outcome": null,
+    "baseline_direct_p95_ms": 91.5,
+    "during_direct_p95_ms": null,
+    "direct_p95_delta_ms": null,
+    "direct_p95_pct_change": null,
+    "baseline_search_p95_ms": 137.0,
+    "during_search_p95_ms": null,
+    "search_p95_delta_ms": null,
+    "search_p95_pct_change": null,
+    "baseline_direct_error_rate": 0.0,
+    "during_direct_error_rate": null,
+    "baseline_search_error_rate": 0.0,
+    "during_search_error_rate": null,
+    "baseline_stale_p95_s": 2.2,
+    "during_stale_p95_s": null,
+    "baseline_lost_acked_max": 0,
+    "during_lost_acked_max": null,
+    "baseline_search_drift_max": 0,
+    "during_search_drift_max": null
+  },
+  "summary": "Deterministic comparison of baseline vs. during-fault measurements for experiment exp-20261010-140527-9af8a1 (delay fault on 'mongodb').",
+  "severity": "low",
+  "root_cause_hypotheses": [],
+  "findings": [
+    {
+      "title": "No significant degradation detected in the saved measurements",
+      "severity": "low",
+      "evidence": "all before/during deltas are within noise",
+      "impact": "No evidence of a resilience weakness from this experiment.",
+      "confidence": "supported_by_measurements",
+      "recommended_fix": "Consider a longer or larger fault parameter to get a more informative signal next time."
+    }
+  ],
+  "recovery_verified": false,
+  "recommended_next_experiment": "Not generated -- AI analysis was unavailable for this run. See the findings above for what to investigate manually."
+}

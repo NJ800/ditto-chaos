@@ -1,0 +1,8 @@
+{
+  "0": {
+    "decision": "approved",
+    "decided_at_utc": "2026-10-10T09:37:14+00:00",
+    "finding_title": "No significant degradation detected in the saved measurements",
+    "note": "recorded for audit trail only -- no automated action was taken (Category B/C fixes in this project always require a human to apply them manually)"
+  }
+}

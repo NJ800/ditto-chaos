@@ -1,0 +1,30 @@
+{
+  "_verification": {
+    "experiment_id": "exp-20261010-151247-ca4ff1",
+    "checked_at_utc": "2026-10-10T09:43:26+00:00",
+    "current_health": {
+      "window_s": 10,
+      "sample_count": 5,
+      "error_rate": 0.0,
+      "direct_error_rate": 0.0,
+      "search_error_rate": 0.0,
+      "direct_p95_ms": 36.0,
+      "search_p95_ms": 41.9,
+      "stale_p95_s": 2.1,
+      "lost_acked": 0,
+      "search_drift": 0,
+      "latest_timestamp": 1791625406.047,
+      "fresh": true,
+      "status": "healthy"
+    },
+    "baseline_direct_p95_ms": null,
+    "verified_healthy_now": true,
+    "note": "This compares LIVE current health to the saved baseline. It does not know whether a specific remediation was actually applied outside this tool -- it only answers 'is the system healthy right now'."
+  },
+  "0": {
+    "decision": "approved",
+    "decided_at_utc": "2026-10-10T09:43:29+00:00",
+    "finding_title": "No significant degradation detected in the saved measurements",
+    "note": "recorded for audit trail only -- no automated action was taken (Category B/C fixes in this project always require a human to apply them manually)"
+  }
+}

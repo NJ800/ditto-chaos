@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0",
+  "generated_at_utc": "2026-10-10T08:12:49+00:00",
+  "experiment_id": "exp-20261010-124738-86f5bb",
+  "analysis_method": "gemini",
+  "evidence": {
+    "experiment_id": "exp-20261010-124738-86f5bb",
+    "fault": "kill",
+    "target": "things-search",
+    "params": {},
+    "state": "RECOVERY_TIMEOUT",
+    "aborted": true,
+    "abort_reason": "search endpoint failed on all of the last 3 ticks",
+    "detected_s": 15.27,
+    "reverted": true,
+    "rollback_verified": true,
+    "rollback_error": null,
+    "recovery_s": null,
+    "recovery_outcome": "timeout",
+    "baseline_direct_p95_ms": 132.2,
+    "during_direct_p95_ms": 47.9,
+    "direct_p95_delta_ms": -84.3,
+    "direct_p95_pct_change": -63.8,
+    "baseline_search_p95_ms": 103.1,
+    "during_search_p95_ms": null,
+    "search_p95_delta_ms": null,
+    "search_p95_pct_change": null,
+    "baseline_direct_error_rate": 0.0,
+    "during_direct_error_rate": 0.0,
+    "baseline_search_error_rate": 0.0,
+    "during_search_error_rate": 1.0,
+    "baseline_stale_p95_s": 3197.02,
+    "during_stale_p95_s": 3214.2,
+    "baseline_lost_acked_max": 0,
+    "during_lost_acked_max": 0,
+    "baseline_search_drift_max": 0,
+    "during_search_drift_max": null
+  },
+  "summary": "A kill fault on the things-search service resulted in a total service outage with a 100% error rate, ultimately failing to recover within the allotted time and triggering a recovery timeout.",
+  "severity": "critical",
+  "root_cause_hypotheses": [
+    {
+      "hypothesis": "The things-search service failed to successfully restart or re-initialize its search endpoint after the process was killed.",
+      "supporting_evidence": "The during_search_error_rate reached 1.0 and the recovery_outcome was 'timeout'.",
+      "contradicting_evidence": "none",
+      "confidence": "supported_by_measurements",
+      "affected_services": [
+        "things-search"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "evidence": "The during_search_error_rate increased from 0.0 to 1.0, and the experiment aborted because the search endpoint failed on all of the last 3 ticks.",
+      "recommended_fix": "Review the liveness and readiness probe configurations for things-search to ensure the orchestrator can correctly identify and recover failed instances.",
+      "title": "Total Search Service Outage",
+      "severity": "critical",
+      "impact": "Users were completely unable to perform search operations during the fault period.",
+      "confidence": "supported_by_measurements"
+    },
+    {
+      "evidence": "The experiment state reached RECOVERY_TIMEOUT and recovery_outcome was 'timeout'.",
+      "recommended_fix": "Investigate the startup latency and dependency initialization (mongodb, things) for the things-search service to identify bottlenecks in the recovery path.",
+      "title": "Recovery Timeout",
+      "severity": "critical",
+      "impact": "The system did not return to a healthy state automatically within the expected timeframe, requiring manual intervention or rollback.",
+      "confidence": "supported_by_measurements"
+    }
+  ],
+  "recovery_verified": false,
+  "recommended_next_experiment": "Execute a controlled restart of the things-search service while monitoring connection pool initialization to MongoDB and the Things service to pinpoint why recovery exceeded the timeout."
+}

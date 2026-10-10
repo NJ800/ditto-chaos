@@ -81,7 +81,23 @@ def write_state(cars: list[Car]) -> None:
     tmp = config.SENT_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f)
-    os.replace(tmp, config.SENT_FILE)  # atomic: probe never reads a half-written file
+    # os.replace() is atomic on POSIX and Windows -- but on Windows specifically it
+    # can raise a transient PermissionError (WinError 5) if another process (probe.py,
+    # reading this same file every PROBE_INTERVAL_S) happens to have it open at that
+    # exact instant: Python's plain open() doesn't request share-delete access, so a
+    # concurrent rename-over-it is briefly denied. This is a real race, observed
+    # crashing the simulator after a few minutes of normal operation on Windows -- not
+    # hypothetical. A short bounded retry is the standard mitigation (the reader's
+    # handle is only ever open for the few microseconds read_acked()'s `with` block
+    # takes, so a brief retry reliably wins the race without masking a real failure).
+    for attempt in range(5):
+        try:
+            os.replace(tmp, config.SENT_FILE)  # atomic: probe never reads a half-written file
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05)
 
 
 async def reporter(cars: list[Car]) -> None:

@@ -1,0 +1,21 @@
+{
+  "recorded_at": 1791625724.2456522,
+  "duration_s": 60,
+  "num_cars": 100,
+  "samples": 30,
+  "direct_error_rate": 0.0,
+  "search_error_rate": 0.0,
+  "direct_ms": {
+    "p50": 38.4,
+    "p95": 89.7,
+    "p99": 100.0
+  },
+  "search_ms": {
+    "p50": 43.7,
+    "p95": 97.1,
+    "p99": 117.6
+  },
+  "stale_p95_s": 2.25,
+  "lost_acked_max": 0,
+  "search_drift_max": 0
+}

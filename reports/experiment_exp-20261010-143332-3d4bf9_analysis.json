@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0",
+  "generated_at_utc": "2026-10-10T09:05:00+00:00",
+  "experiment_id": "exp-20261010-143332-3d4bf9",
+  "analysis_method": "gemini",
+  "evidence": {
+    "experiment_id": "exp-20261010-143332-3d4bf9",
+    "fault": "kill",
+    "target": "things",
+    "params": {},
+    "state": "COMPLETED",
+    "aborted": false,
+    "abort_reason": null,
+    "detected_s": null,
+    "reverted": true,
+    "rollback_verified": true,
+    "rollback_error": null,
+    "recovery_s": 2.01,
+    "recovery_outcome": "recovered",
+    "baseline_direct_p95_ms": 91.5,
+    "during_direct_p95_ms": 50.9,
+    "direct_p95_delta_ms": -40.6,
+    "direct_p95_pct_change": -44.4,
+    "baseline_search_p95_ms": 137.0,
+    "during_search_p95_ms": 54.7,
+    "search_p95_delta_ms": -82.3,
+    "search_p95_pct_change": -60.1,
+    "baseline_direct_error_rate": 0.0,
+    "during_direct_error_rate": 0.0,
+    "baseline_search_error_rate": 0.0,
+    "during_search_error_rate": 0.0,
+    "baseline_stale_p95_s": 2.2,
+    "during_stale_p95_s": 2.15,
+    "baseline_lost_acked_max": 0,
+    "during_lost_acked_max": 0,
+    "baseline_search_drift_max": 0,
+    "during_search_drift_max": 0
+  },
+  "summary": "A 'kill' fault targeting the 'things' service resulted in a significant reduction in p95 latency for both direct and search operations, with zero errors and no data loss recorded.",
+  "severity": "low",
+  "root_cause_hypotheses": [
+    {
+      "hypothesis": "The targeted 'things' service instance was likely a degraded or 'poison' node whose removal allowed the load balancer to route traffic to more performant instances.",
+      "supporting_evidence": "Direct p95 latency decreased by 44.4% (-40.6ms) and search p95 latency decreased by 60.1% (-82.3ms) during the fault.",
+      "contradicting_evidence": "none",
+      "confidence": "plausible_hypothesis",
+      "affected_services": [
+        "things"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "recommended_fix": "Investigate automated health checks and outlier detection to proactively remove or restart degraded service instances that negatively impact tail latency.",
+      "severity": "low",
+      "confidence": "supported_by_measurements",
+      "title": "Significant Latency Improvement During Service Outage",
+      "evidence": "baseline_direct_p95_ms: 91.5, during_direct_p95_ms: 50.9; baseline_search_p95_ms: 137.0, during_search_p95_ms: 54.7",
+      "impact": "The system performed significantly better with one fewer instance, suggesting the baseline state included an underperforming node."
+    },
+    {
+      "recommended_fix": "None required for availability; current redundancy levels are effective.",
+      "severity": "low",
+      "confidence": "supported_by_measurements",
+      "title": "High Availability and Fault Tolerance",
+      "evidence": "during_direct_error_rate: 0.0, during_search_error_rate: 0.0, during_lost_acked_max: 0",
+      "impact": "The 'things' service demonstrated perfect availability and data integrity during a node failure."
+    }
+  ],
+  "recovery_verified": true,
+  "recommended_next_experiment": "Perform a 'kill' fault on a different instance of the 'things' service to determine if the latency improvement is reproducible or specific to the node targeted in this experiment."
+}

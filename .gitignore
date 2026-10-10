@@ -1,4 +1,15 @@
 venv/
+.venv/
 state/
 metrics/
 __pycache__/
+.env
+.env.*
+!.env.example
+experiments/
+.pytest_cache/
+*.pyc
+
+# local clone of upstream Eclipse Ditto (see README "Start Ditto") -- not this
+# project's own code, has its own .git, and is large; clone it yourself locally
+ditto/

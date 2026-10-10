@@ -1,0 +1,241 @@
+{
+  "generated_at_utc": "2026-10-10T08:34:05+00:00",
+  "compose_project": "docker",
+  "docker_query_error": null,
+  "services": [
+    {
+      "name": "nginx",
+      "container": "docker-nginx-1",
+      "image": "nginx:1.27-alpine",
+      "state": "running",
+      "running": true,
+      "role": "support/ui",
+      "in_fault_allowlist": false
+    },
+    {
+      "name": "swagger-ui",
+      "container": "docker-swagger-ui-1",
+      "image": "swaggerapi/swagger-ui:v5.9.1",
+      "state": "running",
+      "running": true,
+      "role": "support/ui",
+      "in_fault_allowlist": false
+    },
+    {
+      "name": "gateway",
+      "container": "docker-gateway-1",
+      "image": "eclipse/ditto-gateway:latest",
+      "state": "running",
+      "running": true,
+      "role": "core-ditto-backend",
+      "in_fault_allowlist": true
+    },
+    {
+      "name": "things-search",
+      "container": "docker-things-search-1",
+      "image": "eclipse/ditto-things-search:latest",
+      "state": "running",
+      "running": true,
+      "role": "core-ditto-backend",
+      "in_fault_allowlist": true
+    },
+    {
+      "name": "things",
+      "container": "docker-things-1",
+      "image": "eclipse/ditto-things:latest",
+      "state": "running",
+      "running": true,
+      "role": "core-ditto-backend",
+      "in_fault_allowlist": true
+    },
+    {
+      "name": "connectivity",
+      "container": "docker-connectivity-1",
+      "image": "eclipse/ditto-connectivity:latest",
+      "state": "running",
+      "running": true,
+      "role": "core-ditto-backend",
+      "in_fault_allowlist": true
+    },
+    {
+      "name": "mongodb",
+      "container": "docker-mongodb-1",
+      "image": "mongo:7.0",
+      "state": "running",
+      "running": true,
+      "role": "core-ditto-backend",
+      "in_fault_allowlist": true
+    },
+    {
+      "name": "ditto-ui",
+      "container": "docker-ditto-ui-1",
+      "image": "eclipse/ditto-ui:latest",
+      "state": "running",
+      "running": true,
+      "role": "support/ui",
+      "in_fault_allowlist": false
+    },
+    {
+      "name": "policies",
+      "container": "docker-policies-1",
+      "image": "eclipse/ditto-policies:latest",
+      "state": "running",
+      "running": true,
+      "role": "core-ditto-backend",
+      "in_fault_allowlist": true
+    }
+  ],
+  "edges": [
+    {
+      "from": "gateway",
+      "to": "things",
+      "source": "known-architecture",
+      "note": "gateway routes thing CRUD requests to the things service",
+      "both_ends_observed_running": true
+    },
+    {
+      "from": "gateway",
+      "to": "things-search",
+      "source": "known-architecture",
+      "note": "gateway routes search queries to the things-search service",
+      "both_ends_observed_running": true
+    },
+    {
+      "from": "gateway",
+      "to": "policies",
+      "source": "known-architecture",
+      "note": "gateway routes policy requests to the policies service",
+      "both_ends_observed_running": true
+    },
+    {
+      "from": "gateway",
+      "to": "connectivity",
+      "source": "known-architecture",
+      "note": "gateway routes connection-management requests to connectivity",
+      "both_ends_observed_running": true
+    },
+    {
+      "from": "things",
+      "to": "mongodb",
+      "source": "known-architecture",
+      "note": "things persists digital-twin state to MongoDB",
+      "both_ends_observed_running": true
+    },
+    {
+      "from": "things-search",
+      "to": "mongodb",
+      "source": "known-architecture",
+      "note": "things-search persists its search index to MongoDB",
+      "both_ends_observed_running": true
+    },
+    {
+      "from": "policies",
+      "to": "mongodb",
+      "source": "known-architecture",
+      "note": "policies persists authorization policies to MongoDB",
+      "both_ends_observed_running": true
+    },
+    {
+      "from": "connectivity",
+      "to": "mongodb",
+      "source": "known-architecture",
+      "note": "connectivity persists connection configuration to MongoDB",
+      "both_ends_observed_running": true
+    },
+    {
+      "from": "things-search",
+      "to": "things",
+      "source": "known-architecture",
+      "note": "things-search consumes change events from things to stay in sync",
+      "both_ends_observed_running": true
+    }
+  ],
+  "fan_in": {
+    "things": 2,
+    "things-search": 1,
+    "policies": 1,
+    "connectivity": 1,
+    "mongodb": 4
+  },
+  "fan_out": {
+    "gateway": 4,
+    "things": 1,
+    "things-search": 2,
+    "policies": 1,
+    "connectivity": 1
+  },
+  "fault_target_recommendations": [
+    {
+      "service": "connectivity",
+      "fan_in": 1,
+      "fan_out": 1,
+      "calculated_risk": "medium",
+      "allowlisted_for_faults": true,
+      "reasoning": "1 other service(s) depend on it"
+    },
+    {
+      "service": "ditto-ui",
+      "fan_in": 0,
+      "fan_out": 0,
+      "calculated_risk": "low",
+      "allowlisted_for_faults": false,
+      "reasoning": "nothing in the known architecture depends on it directly; NOT in guard.py's ALLOWLIST -- guard.py will refuse to target it"
+    },
+    {
+      "service": "gateway",
+      "fan_in": 0,
+      "fan_out": 4,
+      "calculated_risk": "low",
+      "allowlisted_for_faults": true,
+      "reasoning": "nothing in the known architecture depends on it directly"
+    },
+    {
+      "service": "mongodb",
+      "fan_in": 4,
+      "fan_out": 0,
+      "calculated_risk": "high",
+      "allowlisted_for_faults": true,
+      "reasoning": "4 other services depend on it (highest fan-in in this deployment)"
+    },
+    {
+      "service": "nginx",
+      "fan_in": 0,
+      "fan_out": 0,
+      "calculated_risk": "low",
+      "allowlisted_for_faults": false,
+      "reasoning": "nothing in the known architecture depends on it directly; NOT in guard.py's ALLOWLIST -- guard.py will refuse to target it"
+    },
+    {
+      "service": "policies",
+      "fan_in": 1,
+      "fan_out": 1,
+      "calculated_risk": "medium",
+      "allowlisted_for_faults": true,
+      "reasoning": "1 other service(s) depend on it"
+    },
+    {
+      "service": "swagger-ui",
+      "fan_in": 0,
+      "fan_out": 0,
+      "calculated_risk": "low",
+      "allowlisted_for_faults": false,
+      "reasoning": "nothing in the known architecture depends on it directly; NOT in guard.py's ALLOWLIST -- guard.py will refuse to target it"
+    },
+    {
+      "service": "things",
+      "fan_in": 2,
+      "fan_out": 1,
+      "calculated_risk": "medium",
+      "allowlisted_for_faults": true,
+      "reasoning": "2 other service(s) depend on it"
+    },
+    {
+      "service": "things-search",
+      "fan_in": 1,
+      "fan_out": 2,
+      "calculated_risk": "medium",
+      "allowlisted_for_faults": true,
+      "reasoning": "1 other service(s) depend on it"
+    }
+  ]
+}
