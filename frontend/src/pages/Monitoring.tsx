@@ -1,14 +1,14 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type { MetricRow } from "../api/types";
-import { MetricChart, faultWindows } from "../components/MetricChart";
+import { MetricChart, faultWindows, seriesSlot } from "../components/MetricChart";
 import { Empty, Note, PageHeader, Panel, Stat, StateBadge } from "../components/ui";
 import { ago, clock } from "../lib/format";
 import { useLive, useNow } from "../live/LiveContext";
 import { healthLabel } from "../live/stream";
 import { ServicesTable } from "./Overview";
 
-const PALETTE = ["#2563eb", "#15803d", "#b45309", "#7c3aed", "#b91c1c", "#0f766e"];
+/** A product category keeps its colour slot whatever the category filter shows. */
 
 const WINDOWS = [
   { label: "5 min", s: 300 },
@@ -43,6 +43,7 @@ export function Monitoring() {
     return out;
   }, [rows]);
   const profileKeys = Object.keys(profileTitles);
+  const slotOf = (k: string) => seriesSlot(profileKeys.indexOf(k));
   const shown = profile && profileKeys.includes(profile) ? [profile] : profileKeys;
   const block = (r: MetricRow, k: string) => {
     const b = r.profiles?.[k];
@@ -88,8 +89,8 @@ export function Monitoring() {
             rows={rows}
             unit=" ms"
             series={[
-              { key: "direct", label: "direct read", color: "#2563eb", value: (r) => (r.direct_ok ? r.direct_ms : null) },
-              { key: "search", label: "search", color: "#7c3aed", value: (r) => (r.search_ok ? r.search_ms : null) },
+              { key: "direct", label: "direct read", color: "s1", value: (r) => (r.direct_ok ? r.direct_ms : null) },
+              { key: "search", label: "search", color: "s2", value: (r) => (r.search_ok ? r.search_ms : null) },
             ]}
             baseline={b95 ? { value: b95, label: "baseline p95" } : null}
             limit={latencyLimit ? { value: latencyLimit, label: "stop limit" } : null}
@@ -100,22 +101,22 @@ export function Monitoring() {
             rows={rows}
             unit=""
             series={[
-              { key: "direct_fail", label: "direct read failed", color: "#b91c1c", value: (r) => (r.direct_ok ? 0 : 1) },
-              { key: "search_fail", label: "search failed", color: "#b45309", value: (r) => (r.search_ok ? 0 : 1) },
+              { key: "direct_fail", label: "direct read failed", color: "s1", value: (r) => (r.direct_ok ? 0 : 1) },
+              { key: "search_fail", label: "search failed", color: "s2", value: (r) => (r.search_ok ? 0 : 1) },
             ]}
           />
         </Panel>
         <Panel title="Twin staleness p95" meta="seconds since the stored update was sent">
-          <MetricChart rows={rows} unit=" s" series={[{ key: "stale", label: "staleness p95", color: "#15803d", value: (r) => r.stale_p95_s }]} limit={th ? { value: th.max_stale_s, label: "stop limit" } : null} />
+          <MetricChart rows={rows} unit=" s" series={[{ key: "stale", label: "staleness p95", color: "s1", value: (r) => r.stale_p95_s }]} limit={th ? { value: th.max_stale_s, label: "stop limit" } : null} />
         </Panel>
         <Panel title="Data consistency" meta="unknown values are gaps, never zero">
           <MetricChart
             rows={rows}
             unit=""
             series={[
-              { key: "lost", label: "lost acknowledged updates", color: "#b91c1c", value: (r) => r.lost_acked },
-              { key: "drift", label: "search drift (twins)", color: "#b45309", value: (r) => r.search_drift },
-              { key: "faults", label: "active faults", color: "#64748b", value: (r) => r.active_faults ?? null },
+              { key: "lost", label: "lost acknowledged updates", color: "s1", value: (r) => r.lost_acked },
+              { key: "drift", label: "search drift (twins)", color: "s2", value: (r) => r.search_drift },
+              { key: "faults", label: "active faults", color: "s3", value: (r) => r.active_faults ?? null },
             ]}
           />
         </Panel>
@@ -153,36 +154,36 @@ export function Monitoring() {
         ) : (
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <div>
-              <h3 className="mb-1 text-xxs uppercase tracking-wider text-faint">Fresh twins (%)</h3>
+              <h3 className="mb-1 text-xs font-medium text-dim">Fresh twins (%)</h3>
               <MetricChart
                 rows={rows}
                 unit="%"
-                series={shown.map((k, i) => ({ key: `fresh-${k}`, label: profileTitles[k], color: PALETTE[i % PALETTE.length], value: (r: MetricRow) => { const b = block(r, k); return b && b.fresh_ratio !== null ? b.fresh_ratio * 100 : null; } }))}
+                series={shown.map((k) => ({ key: `fresh-${k}`, label: profileTitles[k], color: slotOf(k), value: (r: MetricRow) => { const b = block(r, k); return b && b.fresh_ratio !== null ? b.fresh_ratio * 100 : null; } }))}
               />
             </div>
             <div>
-              <h3 className="mb-1 text-xxs uppercase tracking-wider text-faint">Staleness p95 (s)</h3>
+              <h3 className="mb-1 text-xs font-medium text-dim">Staleness p95 (s)</h3>
               <MetricChart
                 rows={rows}
                 unit=" s"
-                series={shown.map((k, i) => ({ key: `stale-${k}`, label: profileTitles[k], color: PALETTE[i % PALETTE.length], value: (r: MetricRow) => block(r, k)?.stale_p95_s ?? null }))}
+                series={shown.map((k) => ({ key: `stale-${k}`, label: profileTitles[k], color: slotOf(k), value: (r: MetricRow) => block(r, k)?.stale_p95_s ?? null }))}
                 limit={limitFor !== null ? { value: limitFor, label: "freshness limit" } : null}
               />
             </div>
             <div>
-              <h3 className="mb-1 text-xxs uppercase tracking-wider text-faint">Valid twins (%)</h3>
+              <h3 className="mb-1 text-xs font-medium text-dim">Valid twins (%)</h3>
               <MetricChart
                 rows={rows}
                 unit="%"
-                series={shown.map((k, i) => ({ key: `valid-${k}`, label: profileTitles[k], color: PALETTE[i % PALETTE.length], value: (r: MetricRow) => { const b = block(r, k); return b && b.valid_ratio !== null ? b.valid_ratio * 100 : null; } }))}
+                series={shown.map((k) => ({ key: `valid-${k}`, label: profileTitles[k], color: slotOf(k), value: (r: MetricRow) => { const b = block(r, k); return b && b.valid_ratio !== null ? b.valid_ratio * 100 : null; } }))}
               />
             </div>
             <div>
-              <h3 className="mb-1 text-xxs uppercase tracking-wider text-faint">Lost updates + search drift (twins)</h3>
+              <h3 className="mb-1 text-xs font-medium text-dim">Lost updates + search drift (twins)</h3>
               <MetricChart
                 rows={rows}
                 unit=""
-                series={shown.map((k, i) => ({ key: `loss-${k}`, label: profileTitles[k], color: PALETTE[i % PALETTE.length], value: (r: MetricRow) => { const b = block(r, k); return b && b.lost_acked !== null && b.search_drift !== null ? b.lost_acked + b.search_drift : null; } }))}
+                series={shown.map((k) => ({ key: `loss-${k}`, label: profileTitles[k], color: slotOf(k), value: (r: MetricRow) => { const b = block(r, k); return b && b.lost_acked !== null && b.search_drift !== null ? b.lost_acked + b.search_drift : null; } }))}
               />
             </div>
           </div>

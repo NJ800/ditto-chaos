@@ -1,22 +1,58 @@
+import { Activity, Bot, Boxes, FlaskConical, History as HistoryIcon, LayoutDashboard, Lightbulb, Menu, Moon, Network, Sun, TriangleAlert, type LucideIcon } from "lucide-react";
 import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { api, getToken, setToken } from "../api/client";
 import { useAction } from "../hooks";
 import { ago, humanize } from "../lib/format";
+import { setTheme, useTheme } from "../lib/theme";
 import { useLive, useLiveClient, useNow } from "../live/LiveContext";
 import { healthLabel } from "../live/stream";
+import { Sheet, SheetContent, SheetTrigger } from "./sheet";
 import { Badge, Button, ErrorNote, Note, StateBadge } from "./ui";
 
-const NAV = [
-  { to: "/", label: "Overview" },
-  { to: "/monitoring", label: "Live monitoring" },
-  { to: "/fleet", label: "Products & twins" },
-  { to: "/control", label: "Experiment control" },
-  { to: "/agents", label: "Agents" },
-  { to: "/history", label: "History" },
-  { to: "/insights", label: "Insights & learning" },
-  { to: "/dependencies", label: "Dependencies" },
+const NAV: { to: string; label: string; icon: LucideIcon }[] = [
+  { to: "/", label: "Overview", icon: LayoutDashboard },
+  { to: "/monitoring", label: "Live monitoring", icon: Activity },
+  { to: "/fleet", label: "Products & twins", icon: Boxes },
+  { to: "/control", label: "Experiment control", icon: FlaskConical },
+  { to: "/agents", label: "Agents", icon: Bot },
+  { to: "/history", label: "History", icon: HistoryIcon },
+  { to: "/insights", label: "Insights & learning", icon: Lightbulb },
+  { to: "/dependencies", label: "Dependencies", icon: Network },
 ];
+
+/** The one navigation list: rendered in the sidebar on wide screens and in the drawer on narrow ones. */
+function PrimaryNav({ onNavigate }: { onNavigate?: () => void }) {
+  return (
+    <nav aria-label="Primary" className="flex flex-col gap-0.5 p-2">
+      {NAV.map((n) => (
+        <NavLink
+          key={n.to}
+          to={n.to}
+          end={n.to === "/"}
+          onClick={onNavigate}
+          className={({ isActive }) =>
+            `flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors ${isActive ? "bg-accent/10 font-semibold text-accent" : "text-dim hover:bg-raised hover:text-ink"}`
+          }
+        >
+          <n.icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+          {n.label}
+        </NavLink>
+      ))}
+    </nav>
+  );
+}
+
+function ThemeToggle() {
+  const theme = useTheme();
+  const next = theme === "dark" ? "light" : "dark";
+  const Icon = theme === "dark" ? Sun : Moon;
+  return (
+    <button type="button" onClick={() => setTheme(next)} aria-label={`Switch to ${next} theme`} title={`Switch to ${next} theme`} className="rounded-md border border-line bg-surface p-1.5 text-dim transition-colors hover:bg-raised hover:text-ink">
+      <Icon className="h-4 w-4" aria-hidden="true" />
+    </button>
+  );
+}
 
 function ConnectionIndicator() {
   const live = useLive();
@@ -102,7 +138,10 @@ function LockoutBanner() {
     <div role="alert" className="border-b-2 border-l-4 border-bad bg-bad/10 px-4 py-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-sm font-semibold text-ink">Recovery required: fault injection is disabled</div>
+          <div className="flex items-center gap-2 text-sm font-semibold text-bad">
+            <TriangleAlert className="h-4 w-4 shrink-0" aria-hidden="true" />
+            Recovery required: fault injection is disabled
+          </div>
           <div className="mt-0.5 text-xs text-dim">
             {lockout.reason}
             {lockout.experiment_id ? ` (experiment ${lockout.experiment_id})` : ""}. A fault could not be confirmed as removed.
@@ -145,13 +184,31 @@ export function Layout() {
   const label = healthLabel(live, now);
   const orch = live.orchestrator;
   const active = orch && (orch.status === "running" || orch.status === "analyzing");
+  const [menuOpen, setMenuOpen] = useState(false);
   return (
-    <div className="flex min-h-screen flex-col bg-bg">
-      <header className="sticky top-0 z-10 border-b border-line bg-surface shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2.5">
-          <div className="flex items-center gap-4">
-            <span className="text-base font-bold tracking-tight text-ink">ditto-chaos</span>
-            <span className="flex items-center gap-2 text-xxs text-faint">
+    <div className="flex min-h-screen flex-col bg-bg lg:pl-56">
+      <aside className="fixed inset-y-0 left-0 z-20 hidden w-56 flex-col border-r border-line bg-surface lg:flex">
+        <div className="flex h-12 shrink-0 items-center border-b border-line px-4">
+          <span className="text-base font-bold tracking-tight text-ink">ditto-chaos</span>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          <PrimaryNav />
+        </div>
+        <p className="border-t border-line px-4 py-3 text-xs leading-4 text-faint">Chaos experiments for a local Eclipse Ditto sandbox. All telemetry is synthetic.</p>
+      </aside>
+      <header className="sticky top-0 z-10 border-b border-line bg-surface">
+        <div className="flex min-h-[3rem] flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2">
+          <div className="flex items-center gap-3">
+            <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
+              <SheetTrigger className="rounded-md border border-line bg-surface p-1.5 text-dim hover:bg-raised hover:text-ink lg:hidden" aria-label="Open navigation">
+                <Menu className="h-4 w-4" aria-hidden="true" />
+              </SheetTrigger>
+              <SheetContent title="ditto-chaos">
+                <PrimaryNav onNavigate={() => setMenuOpen(false)} />
+              </SheetContent>
+            </Sheet>
+            <span className="text-base font-bold tracking-tight text-ink lg:hidden">ditto-chaos</span>
+            <span className="flex items-center gap-2 text-xs text-faint">
               Target <StateBadge state={label} />
             </span>
             <span className="hidden items-center gap-2 text-xxs text-faint sm:flex">
@@ -166,22 +223,9 @@ export function Layout() {
           <div className="flex items-center gap-3">
             <ConnectionIndicator />
             <TokenControl required={Boolean(live.controller?.auth_required) || (live.error ?? "").startsWith("Not authorized")} />
+            <ThemeToggle />
           </div>
         </div>
-        <nav aria-label="Primary" className="flex gap-1 overflow-x-auto px-3">
-          {NAV.map((n) => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              end={n.to === "/"}
-              className={({ isActive }) =>
-                `whitespace-nowrap border-b-2 px-3 py-2.5 text-sm transition-colors ${isActive ? "border-accent font-semibold text-accent" : "border-transparent text-dim hover:border-line hover:text-ink"}`
-              }
-            >
-              {n.label}
-            </NavLink>
-          ))}
-        </nav>
       </header>
       <LockoutBanner />
       <main className="mx-auto w-full max-w-[1500px] flex-1 px-4 py-4">

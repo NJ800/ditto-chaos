@@ -23,7 +23,7 @@ export function StateBadge({ state, label }: { state: string | null | undefined;
 
 export function Panel({ title, meta, actions, children, flush }: { title: string; meta?: ReactNode; actions?: ReactNode; children: ReactNode; flush?: boolean }) {
   return (
-    <section className="overflow-hidden rounded-lg border border-line bg-surface shadow-sm">
+    <section className="overflow-hidden rounded-lg border border-line bg-surface shadow-card">
       <header className="flex min-h-[2.75rem] flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2">
         <div className="flex items-baseline gap-2">
           <h2 className="text-sm font-semibold text-ink">{title}</h2>
@@ -51,10 +51,10 @@ type BtnProps = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "default" 
 export function Button({ variant = "default", busy, disabled, children, className = "", ...rest }: BtnProps) {
   const look =
     variant === "primary"
-      ? "border-accent bg-accent text-white shadow-sm hover:bg-blue-700"
+      ? "border-accent bg-accent text-onaccent shadow-card hover:bg-accent/90"
       : variant === "danger"
-        ? "border-bad bg-bad text-white shadow-sm hover:bg-red-800"
-        : "border-line bg-surface text-ink shadow-sm hover:bg-raised";
+        ? "border-bad bg-bad text-onaccent shadow-card hover:bg-bad/90"
+        : "border-line bg-surface text-ink shadow-card hover:bg-raised";
   return (
     <button
       type="button"

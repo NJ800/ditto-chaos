@@ -2,6 +2,47 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Design tokens. Light is the default; `.dark` on <html> (set by src/lib/theme.ts)
+   switches to the original dark palette. Values are RGB triplets so Tailwind's
+   opacity modifiers (bg-ok/10) keep working. See frontend/DESIGN_SYSTEM.md. */
+:root {
+  color-scheme: light;
+  --bg: 246 248 251;
+  --surface: 255 255 255;
+  --raised: 238 242 247;
+  --line: 220 227 236;
+  --ink: 23 32 51;
+  --dim: 71 85 105;
+  --faint: 91 107 130;
+  --accent: 29 78 216;
+  --onaccent: 255 255 255;
+  --info: 3 105 161;
+  --ok: 18 112 53;
+  --warn: 161 74 8;
+  --bad: 185 28 28;
+  --shadow: 23 32 51;
+  --scrollbar: 197 207 219;
+}
+
+.dark {
+  color-scheme: dark;
+  --bg: 15 16 18;
+  --surface: 22 24 27;
+  --raised: 28 31 35;
+  --line: 42 46 51;
+  --ink: 228 230 232;
+  --dim: 160 166 173;
+  --faint: 131 138 146;
+  --accent: 107 155 216;
+  --onaccent: 15 16 18;
+  --info: 94 177 222;
+  --ok: 79 174 123;
+  --warn: 214 160 58;
+  --bad: 226 110 103;
+  --shadow: 0 0 0;
+  --scrollbar: 42 46 51;
+}
+
 html,
 body,
 #root {
@@ -14,12 +55,17 @@ body {
 
 /* Every interactive element gets a visible keyboard focus ring. */
 :focus-visible {
-  outline: 2px solid #2563eb;
+  outline: 2px solid rgb(var(--accent));
   outline-offset: 2px;
 }
 
-:root {
-  color-scheme: light;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }
 
 @layer components {
@@ -45,6 +91,6 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #c5cfdb;
+  background: rgb(var(--scrollbar));
   border-radius: 5px;
 }

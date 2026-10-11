@@ -239,7 +239,7 @@ function ProposalPanel() {
       {rank.error && <div className="mb-3"><ErrorNote message={rank.error} /></div>}
       {candidates && (
         <div className="mb-4 border-b border-line pb-4">
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-dim">Ranked candidates</h3>
+          <h3 className="mb-2 text-sm font-semibold text-ink">Ranked candidates</h3>
           <CandidateList view={candidates} selected={proposal?.validation.signature ?? null} onSelected={setProposal} disabledReason={null} />
         </div>
       )}

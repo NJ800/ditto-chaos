@@ -163,7 +163,7 @@ export function ActivityLog({ experimentId, currentState, pollMs = 1500 }: { exp
     <section aria-label="Activity log">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-dim">Activity log</h3>
+          <h3 className="text-sm font-semibold text-ink">Activity log</h3>
           {dryRun && <Badge tone="warn">dry run: nothing is executed</Badge>}
           <span className="text-xxs text-faint" role="status">
             {polling ? "live, updating" : terminal ? `${events.length} event(s), complete` : ""}
