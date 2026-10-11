@@ -80,6 +80,19 @@ def test_every_profile_generates_valid_consistent_twins_over_time(key):
             prev = thing["features"]
 
 
+def test_ev_stays_in_its_service_area_after_long_gaps_between_updates():
+    """A request to Ditto that hangs during a fault makes the next step cover a long gap.
+    The car must not be carried out of its service area by that one step."""
+    fl = mk({"SIM_FLEET": "ev:8", "SIM_SEED": "7"})
+    for spec in fl.twins:
+        tw, now = simulator.Twin(spec, fl, now=NOW), NOW
+        for i in range(300):
+            now += 1800.0 if i % 10 == 0 else spec.interval_s      # a 30-minute stall every 10th update
+            thing = as_thing(fl, spec, tw.next_features(now=now))
+            res = profiles.validate_twin(profiles.REGISTRY["ev"], spec.kind, thing, None, now + 1)
+            assert "ev.in_service_area" not in res["violations"], (spec.id, i, thing["features"]["location"])
+
+
 def test_ev_values_stay_in_range_and_charging_is_stationary():
     fl = mk({"SIM_FLEET": "ev:5", "SIM_SEED": "3"})
     for spec in fl.twins:

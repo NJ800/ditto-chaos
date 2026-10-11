@@ -366,6 +366,12 @@ class ElectricVehicle(Profile):
                 s["heading"] = (s["heading"] + rng.uniform(-20, 20)) % 360
             s["lat"] += km / 111.0 * math.cos(math.radians(s["heading"]))
             s["lon"] += km / 111.0 * math.sin(math.radians(s["heading"]))
+            # One step can cover a long gap (a request to Ditto that hung during a fault, a
+            # suspended process). The distance still counts on the odometer, but the car must
+            # not be carried out of its service area, which ev.in_service_area checks.
+            edge = p.area_deg * 1.4
+            s["lat"] = min(max(s["lat"], p.base_lat - edge), p.base_lat + edge)
+            s["lon"] = min(max(s["lon"], p.base_lon - edge), p.base_lon + edge)
             if s["level"] < rng.uniform(15, 25) and s["speed"] < 5:
                 s["charging"], s["speed"] = True, 0.0
                 s["cpow"], s["target"] = rng.choice([7.4, 11.0, 22.0, 50.0]), rng.uniform(80, 95)
