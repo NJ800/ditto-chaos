@@ -1,0 +1,518 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{accent}{HTML}{1D4ED8}
+\titleformat{\section}{\Large\bfseries\color{accent}}{\thesection}{0.8em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.8em}{}
+\setlist{itemsep=2pt, topsep=4pt}
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+\renewcommand{\arraystretch}{1.25}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{ditto-chaos: Project Report}
+\rhead{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ---- Fill these in before submitting -------------------------------------
+\newcommand{\teamname}{[Team name]}
+\newcommand{\teammembers}{[Member 1], [Member 2], [Member 3], [Member 4]}
+\newcommand{\institution}{[Institution / event name]}
+\newcommand{\reportdate}{October 2026}
+% --------------------------------------------------------------------------
+
+\begin{document}
+
+\begin{titlepage}
+  \centering
+  \vspace*{3cm}
+  {\Huge\bfseries\color{accent} ditto-chaos\par}
+  \vspace{0.6cm}
+  {\Large Safety-First Chaos Engineering for Digital Twins\par}
+  \vspace{2cm}
+  {\large Project Report\par}
+  \vspace{2.5cm}
+  {\large \teamname\par}
+  \vspace{0.3cm}
+  {\teammembers\par}
+  \vspace{1.5cm}
+  {\institution\par}
+  \vspace{0.3cm}
+  {\reportdate\par}
+  \vfill
+  {\small Source code: \url{https://github.com/NJ800/ditto-chaos}\par}
+\end{titlepage}
+
+\begin{abstract}
+\noindent
+ditto-chaos is a chaos-engineering tool for Eclipse Ditto, an open-source
+digital-twin platform. It injects one controlled fault at a time into a local
+Ditto sandbox, measures the effect with the same signals an on-call engineer
+would use, and stops and rolls back automatically when a safety limit is
+crossed. Every rollback is verified by inspecting the system, not assumed from
+a command's exit code. After each experiment the tool produces findings and
+recommended fixes. Artificial intelligence is optional and never makes a safety
+decision: deterministic code authorizes, stops and reverts every experiment.
+In a live run, six fault types were injected in sequence; all six were rolled
+back and verified, and Ditto recovered in 2 to 22 seconds. The system is
+covered by 547 automated backend tests and 85 frontend tests.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ==========================================================================
+\section{Introduction}
+
+\subsection{Background}
+
+A digital twin is a software copy of a physical device, such as a car, a
+machine or a sensor. Eclipse Ditto stores these twins, accepts updates from
+devices and lets applications read and search them. A platform like this sits
+in the critical path between a fleet of real devices and the applications that
+depend on them.
+
+Chaos engineering is the practice of deliberately breaking part of a system in
+a controlled way, to learn how it fails and whether it recovers before a real
+outage does the same thing unplanned.
+
+\subsection{Problem statement}
+
+A system that works on a healthy day is not necessarily resilient. Teams
+usually discover how their platform fails during a real incident, when the
+cost is highest. Existing chaos tools can inject faults, but injecting a fault
+safely needs more: a way to stop automatically, proof that the fault was
+removed, and a clear record of what was learned.
+
+\subsection{Objectives}
+
+\begin{enumerate}
+  \item Inject controlled, reversible faults into a running Ditto deployment.
+  \item Monitor system health continuously during an experiment.
+  \item Stop and roll back automatically when a safety limit is crossed.
+  \item Verify every rollback and measure recovery time.
+  \item Turn measurements into findings and recommendations.
+  \item Keep every safety decision in deterministic code, with AI as an
+        optional advisory layer.
+  \item Present everything in a live dashboard.
+\end{enumerate}
+
+\subsection{Scope}
+
+The tool targets a local, disposable Ditto sandbox running under Docker
+Compose. It is not intended for production systems. All device telemetry is
+synthetic and labelled as such.
+
+% ==========================================================================
+\section{System Overview}
+
+\subsection{System under test}
+
+Eclipse Ditto runs as nine Docker containers: \texttt{gateway},
+\texttt{things}, \texttt{things-search}, \texttt{policies},
+\texttt{connectivity}, \texttt{mongodb}, \texttt{nginx}, and two user
+interfaces. MongoDB is the shared dependency of the core services, which is
+why the tool's dependency map rates it as the highest-risk service.
+
+\subsection{Synthetic fleet}
+
+A simulator creates digital twins and sends telemetry so that there is real
+traffic to measure. Six product profiles are available.
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}lL@{}}
+\toprule
+\textbf{Profile} & \textbf{Example features} \\
+\midrule
+Electric vehicle & battery level, location, speed, temperature \\
+Industrial machine & motor temperature, rpm, vibration, fault codes \\
+Smart home & climate, thermostat, lighting, door contact \\
+Energy system & solar generation, grid power, storage \\
+Environmental sensor & temperature, humidity, air quality \\
+Connected appliance & cycle status, power, error code \\
+\bottomrule
+\end{tabularx}
+\caption{Product profiles in the simulated fleet.}
+\end{table}
+
+Every update carries a sequence number and a send time, so staleness and lost
+updates are measured the same way for every product.
+
+% ==========================================================================
+\section{Architecture}
+
+The system is organised in layers. Each layer calls only the one below it, and
+exactly one module is allowed to start a real fault.
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}lLl@{}}
+\toprule
+\textbf{Layer} & \textbf{Responsibility} & \textbf{Main modules} \\
+\midrule
+Dashboard & Eight pages showing live state and controls & \texttt{frontend/} \\
+API & REST endpoints and a live event stream & \texttt{api.py}, \texttt{events.py} \\
+Analysis & Agents, planning, learning, recommendations & \texttt{agents.py}, \texttt{learning.py} \\
+Control & The single approval gate; operating modes & \texttt{orchestrator.py}, \texttt{controller.py} \\
+Fault engine & Fault types, scenarios, kill switch, rollback & \texttt{faults.py}, \texttt{scenario.py}, \texttt{guard.py} \\
+Measurement & Health probe and baseline & \texttt{probe.py}, \texttt{monitor.py} \\
+Traffic & Synthetic fleet & \texttt{simulator.py}, \texttt{profiles.py} \\
+Storage & Knowledge store, records, recovery journal & \texttt{store.py} \\
+Target & Eclipse Ditto in Docker & external \\
+\bottomrule
+\end{tabularx}
+\caption{Architecture layers, top to bottom.}
+\end{table}
+
+\subsection{Design principles}
+
+\begin{itemize}
+  \item \textbf{One approval gate.} The command line and the dashboard both go
+        through \texttt{orchestrator.py}, so there is one allowlist and one
+        authorization check regardless of entry point.
+  \item \textbf{Fail closed.} A missing, unhealthy or untrusted measurement is
+        treated as a reason to stop, never as ``healthy''.
+  \item \textbf{Verify, do not assume.} A rollback counts only after the clean
+        state has been observed.
+  \item \textbf{AI is advisory.} AI output is schema-validated before use and
+        has a deterministic fallback.
+\end{itemize}
+
+% ==========================================================================
+\section{Fault Injection}
+
+Nine fault types are supported, in three groups.
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}llL@{}}
+\toprule
+\textbf{Group} & \textbf{Fault} & \textbf{Effect} \\
+\midrule
+Process & \texttt{kill} & Force-kills the container, then starts it again \\
+        & \texttt{stop} & Graceful shutdown, then start \\
+        & \texttt{restart} & Restarts the container \\
+        & \texttt{pause} & Freezes the process; connections stay open \\
+Network & \texttt{delay} & Fixed delay on outgoing packets \\
+        & \texttt{jitter} & Variable delay per packet \\
+        & \texttt{loss} & Drops a percentage of packets \\
+        & \texttt{bandwidth} & Caps the outgoing rate \\
+Resource & \texttt{cpu\_throttle} & Caps the container's CPU share \\
+\bottomrule
+\end{tabularx}
+\caption{Supported fault types.}
+\end{table}
+
+Three further types (\texttt{cpu\_stress}, \texttt{memory\_pressure},
+\texttt{request\_failure}) are deliberately not supported, because they cannot
+be bounded or reversed safely in this deployment. The tool lists them together
+with the reason.
+
+Several faults can be combined in one scenario. A scenario is limited to three
+concurrent faults across two services, and only combinations that have been
+tested are allowed.
+
+% ==========================================================================
+\section{Safety Model}
+
+\subsection{Kill switch}
+
+A health probe runs every two seconds during an experiment. The experiment is
+stopped and reverted when any of the following holds.
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}lL@{}}
+\toprule
+\textbf{Signal} & \textbf{Stop condition} \\
+\midrule
+Service outage & Direct reads or searches fail on three consecutive checks \\
+Error rate & Above 5\% over the recent window \\
+Latency & 95th percentile above 3$\times$ the healthy baseline (minimum 200 ms) \\
+Staleness & Twin data more than 15 seconds old \\
+Lost update & Any acknowledged update is missing; stops immediately \\
+\bottomrule
+\end{tabularx}
+\caption{Kill-switch conditions (default thresholds).}
+\end{table}
+
+\subsection{Guarantees}
+
+\begin{itemize}
+  \item A real fault needs explicit operator authorization. An AI proposal can
+        never run on its own.
+  \item Every applied fault is rolled back independently and the result is
+        verified.
+  \item A revert is attempted on a kill-switch trip, at the time limit, on a
+        manual stop and after a crash. A recovery journal on disk lets the
+        tool finish a rollback after a restart.
+  \item If a rollback cannot be verified, the system enters a
+        \emph{recovery required} state and refuses all fault injection until
+        an operator resolves it.
+\end{itemize}
+
+\subsection{Dry run}
+
+A dry run walks the complete lifecycle with real health checks and lists every
+command it would execute, but executes none. It needs no authorization and
+never counts as evidence.
+
+\subsection{Operating modes}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}lL@{}}
+\toprule
+\textbf{Mode} & \textbf{What is allowed} \\
+\midrule
+\texttt{observe} & Read-only. Nothing can be injected. \\
+\texttt{recommend} & Default. An operator may authorize a scenario the planner proposed. \\
+\texttt{manual} & An operator may write and authorize any scenario that passes policy. \\
+\texttt{autonomous\_sandbox} & A bounded loop runs experiments itself. Must be enabled in the configuration file; cannot be enabled from the dashboard. \\
+\bottomrule
+\end{tabularx}
+\caption{Operating modes.}
+\end{table}
+
+% ==========================================================================
+\section{Experiment Workflow}
+
+\begin{enumerate}
+  \item \textbf{Policy check.} Targets are allowlisted, parameters are within
+        bounds and scenario limits are respected.
+  \item \textbf{Preflight.} Docker and every target container are inspected,
+        read-only.
+  \item \textbf{Baseline.} Health is measured. If the saved baseline is older
+        than 60 minutes, a fresh one is measured over 30 seconds. Nothing is
+        injected unless Ditto is healthy.
+  \item \textbf{Inject.} The fault is applied.
+  \item \textbf{Monitor.} The probe runs every two seconds and the kill switch
+        is evaluated on each result.
+  \item \textbf{Revert and verify.} The fault is removed and the clean state
+        is confirmed.
+  \item \textbf{Recovery.} The time until three consecutive healthy checks is
+        recorded.
+  \item \textbf{Analysis.} Findings, a learning record and recommendations are
+        produced. No recommendation is applied automatically.
+\end{enumerate}
+
+Each step writes to an activity log that records what the controller did and
+why, including the measured numbers behind every continue-or-stop decision.
+
+% ==========================================================================
+\section{Analysis and Learning}
+
+Seven agents process each experiment, coordinated by a single coordinator.
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}lL@{}}
+\toprule
+\textbf{Agent} & \textbf{Role} \\
+\midrule
+Risk & Rates each service from the dependency map and past runs \\
+Fault injection & Proposes the next scenario from validated candidates \\
+Recovery & Reports rollback and recovery per fault \\
+Validation & Checks whether the run is usable as evidence \\
+Insights & Derives findings, separating measured facts from hypotheses \\
+Learning & Compares the outcome with the prediction and updates rankings \\
+Remediation & Produces recommendations and tracks their status \\
+\bottomrule
+\end{tabularx}
+\caption{Agents.}
+\end{table}
+
+Results are kept in a SQLite knowledge store. A deterministic ranking uses the
+dependency map, service risk, experiment history and coverage gaps to suggest
+which experiment is most worth running next. There is no trained model, by
+design.
+
+After an operator applies a fix, the original experiment can be re-run. The
+tool then shows each metric before and after, and labels the result as an
+observed correlation, not proof of causation.
+
+\subsection{Role of AI}
+
+When enabled, a language model (Google Gemini) may explain results, suggest
+root causes and choose among candidates the policy engine has already
+validated. It may not decide when to stop, authorize a run, issue a command or
+apply a fix. With AI disabled, a rule-based analysis of the same measurements
+is used and labelled as such.
+
+% ==========================================================================
+\section{Dashboard}
+
+The dashboard is a single-page web application with eight pages.
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}lL@{}}
+\toprule
+\textbf{Page} & \textbf{Content} \\
+\midrule
+Overview & Target health against baseline, container states, alerts \\
+Live monitoring & Latency, failure, staleness and consistency charts with fault intervals shaded and stop limits drawn \\
+Products and twins & Fleet configuration and per-twin status \\
+Experiment control & Operating mode, scenario builder, preview, dry run, authorization, emergency stop \\
+Agents & State and last result of each agent \\
+History & Past experiments with measurements, findings and timeline \\
+Insights and learning & Evidence counts, rankings, recommendation tracking \\
+Dependencies & Call edges, blast radius and risk per service \\
+\bottomrule
+\end{tabularx}
+\caption{Dashboard pages.}
+\end{table}
+
+The interface uses a light theme by default with a dark option. Status is
+never shown by colour alone: every state has a text label. All text colour
+pairs meet a contrast ratio of at least 4.5:1.
+
+% ==========================================================================
+\section{Technology Stack}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}lL@{}}
+\toprule
+\textbf{Area} & \textbf{Technology} \\
+\midrule
+Backend & Python 3.11, FastAPI, Uvicorn, Pydantic, httpx \\
+Storage & SQLite, JSON experiment records \\
+Frontend & React 18, TypeScript, Vite, Tailwind CSS, Recharts, React Router \\
+Infrastructure & Docker Compose; Linux \texttt{tc netem} for network faults \\
+Testing & pytest, Vitest, Playwright \\
+AI (optional) & Google Gemini, with a deterministic fallback \\
+\bottomrule
+\end{tabularx}
+\caption{Technology stack.}
+\end{table}
+
+% ==========================================================================
+\section{Testing}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}lL@{}}
+\toprule
+\textbf{Suite} & \textbf{Result} \\
+\midrule
+Backend unit and contract tests & 547 passed, 11 skipped (the skipped tests are opt-in suites that need a real Docker daemon or a live Ditto) \\
+Frontend component tests & 85 passed \\
+Type check and production build & Clean \\
+Browser smoke test & All pages opened; plan preview, dry run, ranked candidates, experiment detail and re-run panel exercised; no console errors or failed requests \\
+\bottomrule
+\end{tabularx}
+\caption{Test results.}
+\end{table}
+
+Backend tests mock Docker, Ditto and the AI provider, so they run offline.
+They cover the fault registry, the scenario engine (partial failure, emergency
+stop, lockout, journal replay), the agents, the learning logic and the HTTP
+contract.
+
+% ==========================================================================
+\section{Results}
+
+Six faults were injected one after another against the local sandbox, each
+with a 15-second limit. All six were rolled back and verified, and Ditto
+returned to a healthy state each time.
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}llLr@{}}
+\toprule
+\textbf{Fault} & \textbf{Target} & \textbf{What ended it} & \textbf{Recovery} \\
+\midrule
+\texttt{kill} & things-search & Kill switch: search failed 3 checks in a row & 22.1 s \\
+\texttt{stop} & things-search & Kill switch: search failed 3 checks in a row & 12.1 s \\
+\texttt{restart} & things-search & Ran its full 15 seconds & 2.0 s \\
+\texttt{pause} & things-search & Kill switch: search failed 3 checks in a row & 4.0 s \\
+\texttt{delay} (300 ms) & mongodb & Kill switch: latency above 3$\times$ baseline & 6.1 s \\
+\texttt{jitter} (200$\pm$100 ms) & things & Kill switch: direct reads failed 3 checks in a row & 8.1 s \\
+\bottomrule
+\end{tabularx}
+\caption{Live fault-injection run. Each experiment took 26 to 48 seconds end to end.}
+\end{table}
+
+\subsection{Observations}
+
+\begin{itemize}
+  \item The kill switch stopped five of the six experiments before their time
+        limit, in each case for the signal the fault was expected to affect.
+  \item A 300 ms delay on MongoDB was enough to push read latency past three
+        times the baseline, which confirms MongoDB as the most sensitive
+        dependency.
+  \item Recovery after a forced kill took about ten times longer than after a
+        restart (22.1 s against 2.0 s).
+\end{itemize}
+
+The remaining three fault types (\texttt{loss}, \texttt{bandwidth},
+\texttt{cpu\_throttle}) were not part of this run.
+
+% ==========================================================================
+\section{Limitations}
+
+\begin{itemize}
+  \item The tool is built and tested for a local sandbox, not production.
+  \item The automatic removal of a network fault survives a crash of the tool
+        itself, but not a crash of the Docker daemon or the host.
+  \item Staleness assumes one shared clock; it has not been validated across
+        machines.
+  \item The autonomous mode has been tested only against a simulated Docker.
+  \item The largest fleet validated under load is 120 twins.
+  \item AI analysis can be wrong about the mechanism even when the
+        measurements are correct, so findings are a lead to verify, not a
+        verdict.
+\end{itemize}
+
+% ==========================================================================
+\section{Future Work}
+
+\begin{itemize}
+  \item Run the three remaining fault types and the autonomous loop against
+        the live sandbox.
+  \item Support deployments on Kubernetes in addition to Docker Compose.
+  \item Add a fault-injecting proxy so that request-level failures can be
+        tested safely.
+  \item Validate larger fleets and multi-machine setups.
+\end{itemize}
+
+% ==========================================================================
+\section{Conclusion}
+
+ditto-chaos shows that chaos experiments on a digital-twin platform can be run
+with strong safety guarantees: an automatic kill switch, verified rollback, a
+lockout when recovery cannot be confirmed, and explicit operator
+authorization. Keeping every safety decision in deterministic code, with AI
+limited to explanation and ranking, made the system both testable and
+trustworthy. In a live run the tool injected six different faults, stopped
+five of them automatically, and verified recovery in every case.
+
+% ==========================================================================
+\section*{References}
+\addcontentsline{toc}{section}{References}
+
+\begin{enumerate}[label={[\arabic*]}]
+  \item Eclipse Ditto. \url{https://github.com/eclipse-ditto/ditto}
+  \item ditto-chaos source code. \url{https://github.com/NJ800/ditto-chaos}
+  \item FastAPI. \url{https://fastapi.tiangolo.com}
+  \item React. \url{https://react.dev}
+  \item Docker Compose. \url{https://docs.docker.com/compose/}
+\end{enumerate}
+
+\end{document}
