@@ -1,0 +1,99 @@
+1
+00:00:01,162 --> 00:00:04,575
+ditto-chaos: chaos engineering for an Eclipse Ditto digital-twin sandbox.
+
+2
+00:00:04,675 --> 00:00:08,113
+Before the test, the target is healthy: no errors, no lost updates.
+
+3
+00:00:08,213 --> 00:00:11,639
+100 synthetic twins in three product categories, all fresh and valid.
+
+4
+00:00:11,739 --> 00:00:17,272
+Nine services are running, and the healthy baseline is valid.
+
+5
+00:00:17,372 --> 00:00:21,974
+The operator switches to manual mode to choose the fault.
+
+6
+00:00:22,074 --> 00:00:25,370
+Fault: freeze the search service (pause on things-search), 12 seconds at most.
+
+7
+00:00:25,470 --> 00:00:30,671
+Preview first: a policy check that executes nothing.
+
+8
+00:00:30,771 --> 00:00:34,953
+It lists the exact commands, the rollback order and the stop conditions.
+
+9
+00:00:35,053 --> 00:00:41,932
+A real fault needs explicit operator authorization.
+
+10
+00:00:42,032 --> 00:00:45,505
+The controller checks policy, containers and current health before touching anything.
+
+11
+00:00:45,605 --> 00:00:50,667
+The Pipeline tab follows the run stage by stage. Stage 4, Baseline: health is confirmed first.
+
+13
+00:00:50,767 --> 00:00:59,622
+Fault injected: the search service is frozen. The Monitor stage counts failed checks toward the kill switch.
+
+14
+00:00:59,722 --> 00:01:05,814
+Live monitoring shows the same fault on the charts, as it happens.
+
+15
+00:01:05,914 --> 00:01:09,400
+Kill switch: search endpoint failed on all of the last 3 ticks. Rolling back automatically.
+
+16
+00:01:09,500 --> 00:01:12,600
+Rollback verified. Measuring how long Ditto takes to recover.
+
+16
+00:01:12,700 --> 00:01:17,557
+Ditto recovered 2.0 seconds after the rollback.
+
+17
+00:01:17,657 --> 00:01:23,297
+The charts show the impact: search failures during the fault, then back to normal.
+
+18
+00:01:23,397 --> 00:01:30,846
+Back on the Pipeline: Monitor was stopped by the kill switch, and the rollback is verified.
+
+19
+00:01:30,946 --> 00:01:39,646
+The agents lane shows what each of the seven agents concluded for this run.
+
+20
+00:01:39,746 --> 00:01:45,674
+The report: stopped by the kill switch, rollback verified, recovered in 2.0 s.
+
+21
+00:01:45,774 --> 00:01:51,838
+Impact is reported per product category, from measured data only.
+
+22
+00:01:51,938 --> 00:02:00,411
+Findings: measured facts are labelled separately from hypotheses.
+
+23
+00:02:00,511 --> 00:02:09,541
+Recommended fixes are proposed for an operator to decide. Nothing is applied automatically.
+
+24
+00:02:09,641 --> 00:02:19,843
+Every run adds to the evidence base and re-ranks which experiment to run next.
+
+25
+00:02:19,943 --> 00:02:27,412
+Injected, observed, stopped, verified, explained.

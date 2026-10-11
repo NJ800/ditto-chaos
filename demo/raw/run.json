@@ -1,0 +1,27 @@
+{
+  "experiment_id": "exp-20261011-100921-db2a91",
+  "run_clicked_at_s": 39.625,
+  "state_BASELINE_at_s": 47.143,
+  "state_INJECTING_at_s": 50.242,
+  "state_MONITORING_at_s": 50.767,
+  "state_REVERTING_at_s": 65.914,
+  "state_VERIFYING_RECOVERY_at_s": 66.439,
+  "state_COMPLETED_at_s": 72.63,
+  "state": "COMPLETED",
+  "stop_reason": "search endpoint failed on all of the last 3 ticks",
+  "detected_s": 15.38,
+  "recovery_outcome": "recovered",
+  "recovery_s": 2.03,
+  "rollback_verified": true,
+  "actions": [
+    {
+      "fault": "pause",
+      "target": "things-search",
+      "status": "rolled_back",
+      "rollback_verified": true
+    }
+  ],
+  "first_finding_text": "Direct-read latency degradation",
+  "first_recommendation_text": "Degrade search gracefully and isolate it behind a circuit breaker",
+  "length_s": 147.512
+}
