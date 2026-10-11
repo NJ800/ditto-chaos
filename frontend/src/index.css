@@ -94,3 +94,37 @@ body {
   background: rgb(var(--scrollbar));
   border-radius: 5px;
 }
+
+/* ---- Pipeline page: state-change motion. Triggered only by a real state change; each
+   animation runs once (the active-stage dot is the only loop). Transform, opacity and
+   colour only. Reduced motion: every one of these is removed, the icons and words stay. */
+@keyframes pl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@keyframes pl-settle { 0% { transform: scale(1); } 50% { transform: scale(1.02); } 100% { transform: scale(1); } }
+@keyframes pl-shake { 0%, 50%, 100% { transform: translateX(0); } 25%, 75% { transform: translateX(-4px); } 37%, 87% { transform: translateX(4px); } }
+@keyframes pl-draw { from { stroke-dashoffset: 24; } to { stroke-dashoffset: 0; } }
+@keyframes pl-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pl-fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes pl-slide { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pl-sweep { 0%, 100% { opacity: 0; } 40% { opacity: 1; } }
+@keyframes pl-flash { from { background-color: rgb(var(--accent) / 0.22); } to { background-color: transparent; } }
+.pl-pulse { animation: pl-pulse 1.6s ease-in-out infinite; }
+.pl-settle { animation: pl-settle 250ms ease-out 1; }
+.pl-shake { animation: pl-shake 320ms ease-in-out 1; }
+.pl-draw path, .pl-draw polyline { stroke-dasharray: 24; animation: pl-draw 300ms ease-out 1 both; }
+.pl-fade { animation: pl-fade 220ms ease-out 1; }
+.pl-fill { animation: pl-fill 350ms ease-out 1 both; }
+.pl-slide { animation: pl-slide 250ms ease-out 1; }
+.pl-flash { animation: pl-flash 150ms ease-out 1; }
+.pl-sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgb(var(--ok) / 0.16);
+  opacity: 0;
+  pointer-events: none;
+  animation: pl-sweep 260ms ease-out var(--pl-delay, 0ms) 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pl-pulse, .pl-settle, .pl-shake, .pl-fade, .pl-fill, .pl-slide, .pl-flash, .pl-draw path, .pl-draw polyline, .pl-sweep::after { animation: none !important; }
+}

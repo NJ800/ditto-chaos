@@ -7,7 +7,7 @@ import { mkdirSync } from "node:fs";
 
 const BASE = process.env.E2E_BASE_URL ?? "http://localhost:5173";
 const PAGES = [["overview", "/"], ["monitoring", "/monitoring"], ["fleet", "/fleet"], ["control", "/control"],
-               ["agents", "/agents"], ["history", "/history"], ["insights", "/insights"], ["dependencies", "/dependencies"]];
+               ["pipeline", "/pipeline"], ["agents", "/agents"], ["history", "/history"], ["insights", "/insights"], ["dependencies", "/dependencies"]];
 const SIZES = [["desktop", 1440, 900], ["mobile", 375, 812]];
 const problems = [];
 const note = (text) => { problems.push(text); console.log("PROBLEM " + text); };

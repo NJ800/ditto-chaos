@@ -1,4 +1,4 @@
-import { Activity, Bot, Boxes, FlaskConical, History as HistoryIcon, LayoutDashboard, Lightbulb, Menu, Moon, Network, Sun, TriangleAlert, type LucideIcon } from "lucide-react";
+import { Activity, Bot, Boxes, FlaskConical, History as HistoryIcon, LayoutDashboard, Lightbulb, Menu, Moon, Network, Sun, TriangleAlert, Workflow, type LucideIcon } from "lucide-react";
 import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { api, getToken, setToken } from "../api/client";
@@ -15,6 +15,7 @@ const NAV: { to: string; label: string; icon: LucideIcon }[] = [
   { to: "/monitoring", label: "Live monitoring", icon: Activity },
   { to: "/fleet", label: "Products & twins", icon: Boxes },
   { to: "/control", label: "Experiment control", icon: FlaskConical },
+  { to: "/pipeline", label: "Pipeline", icon: Workflow },
   { to: "/agents", label: "Agents", icon: Bot },
   { to: "/history", label: "History", icon: HistoryIcon },
   { to: "/insights", label: "Insights & learning", icon: Lightbulb },

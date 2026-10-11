@@ -180,7 +180,10 @@ export function ExperimentDetailPage() {
             <Link className="text-accent hover:underline" to="/history">
               History
             </Link>{" "}
-            / <span className="num">{rec.signature ?? `${rec.fault}@${rec.target}`}</span> / schema {rec.schema_version}
+            / <span className="num">{rec.signature ?? `${rec.fault}@${rec.target}`}</span> / schema {rec.schema_version} /{" "}
+            <Link className="text-accent hover:underline" to={`/pipeline/${rec.id}`}>
+              pipeline view
+            </Link>
           </span>
         }
         actions={

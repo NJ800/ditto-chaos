@@ -386,6 +386,58 @@ async def test_coordinator_retries_then_succeeds(sandbox):
     assert run["status"] == "completed" and run["attempts"] == 3
 
 
+class _Good(agents.Agent):
+    name, title = "good", "Good"
+
+    def run(self, ctx):
+        return {"answer": 42}
+
+    def summary(self, out):
+        return "answer 42"
+
+
+class _Bad(agents.Agent):
+    name, title = "bad", "Bad"
+
+    def run(self, ctx):
+        raise RuntimeError("kaput")
+
+
+async def test_coordinator_publishes_start_and_finish_events_and_persists_the_run(sandbox, monkeypatch):
+    """The dashboard's agent lane depends on these: a 'running' event when an agent starts, a
+    terminal event when it ends, and the stored run (with its output document) for replay."""
+    seen = []
+    monkeypatch.setattr(agents.bus, "publish", lambda type_, data: seen.append((type_, dict(data))))
+    co = agents.Coordinator()
+    for a in (_Good(), _Bad()):
+        co.register(a)
+    ctx = {}
+    await co.invoke("good", ctx, experiment_id="exp-e")
+    await co.invoke("bad", ctx, experiment_id="exp-e")
+    events = [d for t, d in seen if t == "agent"]
+    assert [(e["agent"], e["status"]) for e in events] == [("good", "running"), ("good", "completed"),
+                                                           ("bad", "running"), ("bad", "failed")]
+    start, end = events[0], events[1]
+    assert start["id"] == end["id"] and start["experiment_id"] == end["experiment_id"] == "exp-e"
+    assert start["started_at_utc"] and start["finished_at_utc"] is None
+    assert end["finished_at_utc"] and end["duration_ms"] is not None and end["summary"] == "answer 42"
+    assert "output" not in end          # events stay small; the document is read from the store
+    assert events[3]["error"].startswith("RuntimeError")
+    stored = {r["agent"]: r for r in store.agent_runs("exp-e")}
+    assert stored["good"]["output"] == {"answer": 42} and stored["good"]["input_ref"] == "exp-e"
+    assert stored["bad"]["status"] == "failed" and stored["bad"]["output"] is None
+
+
+async def test_agent_events_do_not_change_the_result(sandbox, monkeypatch):
+    co = agents.Coordinator()
+    co.register(_Good())
+    with_events = await co.invoke("good", {}, experiment_id="exp-a")
+    monkeypatch.setattr(agents.bus, "publish", lambda *a, **k: None)
+    without = await co.invoke("good", {}, experiment_id="exp-b")
+    same = ("status", "summary", "output", "error", "attempts", "method")
+    assert {k: with_events[k] for k in same} == {k: without[k] for k in same}
+
+
 async def test_hybrid_agent_that_fell_back_is_labelled_fallback_not_completed(sandbox, monkeypatch):
     stub_ai(monkeypatch, ai_client.AIUnavailable("down"))
     ctx = orch.gather_context(POLICY)

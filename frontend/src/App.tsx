@@ -9,6 +9,7 @@ import { ExperimentDetailPage, History } from "./pages/History";
 import { Insights } from "./pages/Insights";
 import { Monitoring } from "./pages/Monitoring";
 import { Overview } from "./pages/Overview";
+import { Pipeline } from "./pages/Pipeline";
 
 function NotFound() {
   return (
@@ -30,6 +31,8 @@ export default function App() {
         <Route path="/fleet" element={<Fleet />} />
         <Route path="/control" element={<Control />} />
         <Route path="/experiments" element={<Control />} />
+        <Route path="/pipeline" element={<Pipeline />} />
+        <Route path="/pipeline/:id" element={<Pipeline />} />
         <Route path="/agents" element={<Agents />} />
         <Route path="/history" element={<History />} />
         <Route path="/history/:id" element={<ExperimentDetailPage />} />
